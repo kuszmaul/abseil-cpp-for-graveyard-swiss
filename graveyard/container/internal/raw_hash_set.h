@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-// An open-addressing
-// hashtable with quadratic probing.
+// An open-addressing hashtable with linear probing and graveyard hashing.
 //
 // This is a low level hashtable on top of which different interfaces can be
 // implemented, like flat_hash_set, node_hash_set, string_hash_set, etc.
@@ -55,69 +54,69 @@
 //
 // # Table Layout
 //
-// A raw_hash_set's backing array consists of control bytes followed by slots
-// that may or may not contain objects.
+// A raw_hash_set's backing array comprises *bins*.  Each *bin* comprises
+// *control bytes*, a *search distance*, and *end sentinal*, and slots.  The
+// *control bytes* are an array (typically of length 14) bytes.  The *slots* are
+// an array that can hold values.  In most cases there are the same number of
+// slots as control bytes (but for very small tables, there are fewer slots than
+// control bytes).
 //
-// The layout of the backing array, for `capacity` slots, is thus, as a
-// pseudo-struct:
-//
-//   struct BackingArray {
-//     // Control bytes for the "real" slots.
-//     ctrl_t ctrl[capacity];
-//     // Always `ctrl_t::kSentinel`. This is used by iterators to find when to
-//     // stop and serves no other purpose.
-//     ctrl_t sentinel;
-//     // A copy of the first `kWidth - 1` elements of `ctrl`. This is used so
-//     // that if a probe sequence picks a value near the end of `ctrl`,
-//     // `Group` will have valid control bytes to look at.
-//     ctrl_t clones[kWidth - 1];
-//     // The actual slot data.
-//     slot_type slots[capacity];
-//   };
-//
-// The length of this array is computed by `AllocSize()` below.
-//
-// Control bytes (`ctrl_t`) are bytes (collected into groups of a
-// platform-specific size) that define the state of the corresponding slot in
-// the slot array. Group manipulation is tightly optimized to be as efficient
-// as possible: SSE and friends on x86, clever bit operations on other arches.
-//
-//      Group 1         Group 2        Group 3
-// +---------------+---------------+---------------+
-// | | | | | | | | | | | | | | | | | | | | | | | | |
-// +---------------+---------------+---------------+
-//
-// Each control byte is either a special value for empty slots, deleted slots
-// (sometimes called *tombstones*), and a special end-of-table marker used by
-// iterators, or, if occupied, seven bits (H2) from the hash of the value in the
-// corresponding slot.
-//
-// Storing control bytes in a separate array also has beneficial cache effects,
-// since more logical slots will fit into a cache line.
-//
-// # Hashing
+// Each control byte contains information about whether there is a value, and if
+// there is a value, whether that value is *disordered*, as well as a hash
+// called the H2 hash.
 //
 // We compute two separate hashes, `H1` and `H2`, from the hash of an object.
-// `H1(hash(x))` is an index into `slots`, and essentially the starting point
-// for the probe sequence. `H2(hash(x))` is a 7-bit value used to filter out
+// `H1(hash(x))` is a bin number, and essentially the starting point for the
+// probe sequence. `H2(hash(x))` is a number in [0, 127] used to filter out
 // objects that cannot possibly be the one we are looking for.
+//
+// The encoding is
+//   bit 7:  the value, if present, is disordered.  Always 0 for empty slots.
+//   bits 6:0:
+//    contains 127 if there is no corresponding value, and
+//    otherwise cantains H2, a number in [0, 127).
+//
+// Thus a bin is the following pseudo-struct:
+//   struct Bin {
+//     // The capacity is typically 14, but is sometimes other values to achieve
+//     // better cache alignment.
+//     static size_t BinCapacity = 14;
+//     ctrl_t ctrl[BinCapacity];
+//     uint16_t is_last_bin : 1;
+//     uint16_t search_distance : 7;
+//     // lots may actually be shorter than `BinCapacity` for very small tables.
+//     slot_type slots[BinCapacity];
+//   };
+//   struct ctrl_t {
+//     uint8_t is_disordered : 1;
+//     uint8_t h2 : 7;  // 127 means empty
+//   };
+//
+//  The backing array is an array of `Bin`s.  The number of bins is `
+//  The backing array is thus the following pseudo-struct:
+//    struct {
+//      // H1 is always in [0, logical_bin_count).
+//      size_t logical_bin_count;
+//      // `physical_bin_count` can be slightly larger than `logical_bin_count`.
+//      size_t physical_bin_count;
+//      Bin[physical_bin_count];
+//    };
 //
 // # Table operations.
 //
 // The key operations are `insert`, `find`, and `erase`.
 //
 // Since `insert` and `erase` are implemented in terms of `find`, we describe
-// `find` first. To `find` a value `x`, we compute `hash(x)`. From
-// `H1(hash(x))` and the capacity, we construct a `probe_seq` that visits every
-// group of slots in some interesting order.
+// `find` first. To `find` a value `x`, we compute `hash(x)`. From `H1(hash(x))`
+// we identify the first bin we will look in.  We also identify the
+// search_distance for that bin.  We will visit up to `search_distance` bins
+// starting at the first bin.
 //
-// We now walk through these indices. At each index, we select the entire group
-// starting with that index and extract potential candidates: occupied slots
-// with a control byte equal to `H2(hash(x))`. If we find an empty slot in the
-// group, we stop and return an error. Each candidate slot `y` is compared with
-// `x`; if `x == y`, we are done and return `&y`; otherwise we continue to the
-// next probe index. Tombstones effectively behave like full slots that never
-// match the value we're looking for.
+// For each Bin we examine the `ctrl` bytes looking for occupied slots with a h2
+// control byte equal to `H2(hash(x))`.  Each candidate slot `y` is compared
+// with `x`; if `x == y`, we are done and return `&y`; otherwise we continue to
+// the next probe index.  (Note that unlike swiss raw_hash_map, the is no
+// separate tombstone: there are only empty slos.)
 //
 // The `H2` bits ensure when we compare a slot to an object with `==`, we are
 // likely to have actually found the object.  That is, the chance is low that
@@ -129,48 +128,70 @@
 // probe sequence.  For example, when doing a `find` on an object that is in the
 // table, `k` is the number of objects between the start of the probe sequence
 // and the final found object (not including the final found object).  The
-// expected number of objects with an H2 match is then `k/128`.  Measurements
-// and analysis indicate that even at high load factors, `k` is less than 32,
-// meaning that the number of "false positive" comparisons we must perform is
-// less than 1/8 per `find`.
-
-// `insert` is implemented in terms of `unchecked_insert`, which inserts a
-// value presumed to not be in the table (violating this requirement will cause
-// the table to behave erratically). Given `x` and its hash `hash(x)`, to insert
-// it, we construct a `probe_seq` once again, and use it to find the first
-// group with an unoccupied (empty *or* deleted) slot. We place `x` into the
-// first such slot in the group and mark it as full with `x`'s H2.
+// expected number of objects with an H2 match is then `k/127`.  If the load
+// factor is `1-1/x` then we end up looking at about x slots (rounding up to
+// 14).  Simulations indicate for a load factor of 75%, the number of slots we
+// need to look as is ??? per `find`.  TODO: Get this data.
+//
+// If the probe sequence would go off the end of the physical_bin_count, we wrap
+// around to bin zero.
+//
+// `insert` is implemented in terms of `unchecked_insert`, which inserts a value
+// presumed to not be in the table (violating this requirement will cause the
+// table to behave erratically). Given `x` and its hash `hash(x)`, to insert it,
+// we construct a probe sequence again, starting at the preferred bin of `x`,
+// and searching arbitrarily far to find the first bin with with an unoccupied
+// slot. We place `x` into the first such slot in the group and mark it as full
+// with `x`'s H2.  We set the search distance of the preferred bin to the
+// maximum of its old value and the distance to the found bin.  Any newly
+// inserted value is marked as disordered.
 //
 // To `insert`, we compose `unchecked_insert` with `find`. We compute `h(x)` and
 // perform a `find` to see if it's already present; if it is, we're done. If
-// it's not, we may decide the table is getting overcrowded (i.e. the load
-// factor is greater than 7/8 for big tables; `is_small()` tables use a max load
-// factor of 1); in this case, we allocate a bigger array, `unchecked_insert`
-// each element of the table into the new array (we know that no insertion here
-// will insert an already-present value), and discard the old backing array. At
-// this point, we may `unchecked_insert` the value `x`.
+// it's not, we may decide the table is getting overcrowded; in this case, we
+// allocate a bigger array, move each element of the table into the new array,
+// and discard the old backing array. At this point, we may `unchecked_insert`
+// the value `x`.
+//
+// Whenever we move elements from one Bin array to another, we take advantage of
+// the fact that the elements are mostly sorted by H1.  In particular we
+// maintain the following invariant:
+//
+//   If `x` and `y` are both in the hash table and the position of `x` is before
+//   `y` and neither `x` or `y` is marked as `disordered` in its control byte,
+//   then `H1(hash(x)) <= H2(hash(y))`
+//
+// We say that `x` is *disordered* if its control byte is marked as disordered,
+// otherwise `x` is *ordered*.
+//
+// As we move items from the old array to the new array, we do a merge of the
+// ordered values with the disordered values.  To do this we maintain two
+// iterators: one scans through the ordered values, and the other scan through
+// the disordered values, putting them into a heap.  One easy way to do this is
+// to take all the disordered values and put them into the heap.  But we can be
+// more careful, and need only put some of the disordered values into the heap,
+// since the `search_distance` bounds how far we would have to look to find a
+// value that could possibly have a hash smaller than the current ordered value.
+// (Also, any value that is wrapped around is marked as disordered.  We keep the
+// number of disordered values small by having the physical_bin_count be a
+// little larger than the logical bin count, and use the wraparound only in the
+// unusual case where the extra physical bins didn't turn out to be big enough.)
 //
 // Below, `unchecked_insert` is partly implemented by `prepare_insert`, which
 // presents a viable, initialized slot pointee to the caller.
 //
 // `erase` is implemented in terms of `erase_at`, which takes an index to a
-// slot. Given an offset, we simply create a tombstone and destroy its contents.
-// If we can prove that the slot would not appear in a probe sequence, we can
-// make the slot as empty, instead. We can prove this by observing that if a
-// group has any empty slots, it has never been full (assuming we never create
-// an empty slot in a group with no empties, which this heuristic guarantees we
-// never do) and find would stop at this group anyways (since it does not probe
-// beyond groups with empties).
+// slot. Given an offset, we simply mark the slot empty and destroy its
+// contents.
 //
-// `erase` is `erase_at` composed with `find`: if we
-// have a value `x`, we can perform a `find`, and then `erase_at` the resulting
-// slot.
+// `erase` is `erase_at` composed with `find`: if we have a value `x`, we can
+// perform a `find`, and then `erase_at` the resulting slot.
 //
-// To iterate, we simply traverse the array, skipping empty and deleted slots
-// and stopping when we hit a `kSentinel`.
+// To iterate, we simply traverse the array, skipping empty slots and stopping
+// at the bin that has `is_last_bin` set.
 
-#ifndef ABSL_CONTAINER_INTERNAL_RAW_HASH_SET_H_
-#define ABSL_CONTAINER_INTERNAL_RAW_HASH_SET_H_
+#ifndef GRAVEYARD_CONTAINER_INTERNAL_RAW_HASH_SET_H_
+#define GRAVEYARD_CONTAINER_INTERNAL_RAW_HASH_SET_H_
 
 #include <algorithm>
 #include <cmath>
@@ -262,55 +283,52 @@ template <typename AllocType>
 void SwapAlloc(AllocType& /*lhs*/, AllocType& /*rhs*/,
                std::false_type /* propagate_on_container_swap */) {}
 
-// The state for a probe sequence.
-//
-// Currently, the sequence is a triangular progression of the form
-//
-//   p(i) := Width * (i^2 + i)/2 + hash (mod mask + 1)
-//
-// The use of `Width` ensures that each probe step does not overlap groups;
-// the sequence effectively outputs the addresses of *groups* (although not
-// necessarily aligned to any boundary). The `Group` machinery allows us
-// to check an entire group with minimal branching.
-//
-// Wrapping around at `mask + 1` is important, but not for the obvious reason.
-// As described above, the first few entries of the control byte array
-// are mirrored at the end of the array, which `Group` will find and use
-// for selecting candidates. However, when those candidates' slots are
-// actually inspected, there are no corresponding slots for the cloned bytes,
-// so we need to make sure we've treated those offsets as "wrapping around".
-//
-// It turns out that this probe sequence visits every group exactly once if the
-// number of groups is a power of two, since (i^2+i)/2 is a bijection in
-// Z/(2^m). See https://en.wikipedia.org/wiki/Quadratic_probing
-template <size_t Width>
-class probe_seq {
+// In principle, the physical bin count should be a function of the bin size and
+// the load factor.  But the bin size is always near 14 and the load factor is
+// never more than about 95%, so we can treat those as as constants.
+constexpr size_t PhysicalBinCount(size_t logical_bin_count) {
+  if (logical_bin_count < 4) {
+    // If there are only 4 bins, then no extra physical bins.  Just wrap around
+    // immediately.
+    return logical_bin_count;
+  }
+  if (logical_bin_count < 16) {
+    return logical_bin_count + 1;
+  }
+  if (logical_bin_count < 64) {
+    return logical_bin_count + 2;
+  }
+  return logical_bin_count + 3;
+}
+
+size_t H1(size_t hash, size_t logical_bin_count) {
+  if constexpr (sizeof(size_t) == 8) {
+    return (absl::uint128(hash) * absl::uint128(logical_bin_count)) >> 64;
+  } else {
+    static_assert(sizeof(size_t) == 4);
+    return (uint64_t(hash) * uint64_t(logical_bin_count)) >> 32;
+  }
+}
+
+size_t H2(size_t hash) {
+  return hash % 127;
+}
+
+template <size_t BinCapacity>
+class IteratorIndex {
  public:
-  // Creates a new probe sequence using `hash` as the initial value of the
-  // sequence and `mask` (usually the capacity of the table) as the mask to
-  // apply to each value in the progression.
-  probe_seq(size_t hash, size_t mask) {
-    assert(((mask + 1) & mask) == 0 && "not a mask");
-    mask_ = mask;
-    offset_ = hash & mask_;
+  Index(size_t hash, size_t logical_bin_count)
+  size_t get_bin_number() const { return bin_; }
+  // Prefix increment
+  IteratorIndex& operator++() {
+    ++off_;
+    if (off_ > PhysicalBinCount(logical_bin_count_)) {
+      off_ = 0;
+    }
   }
-
-  // The offset within the table, i.e., the value `p(i)` above.
-  size_t offset() const { return offset_; }
-  size_t offset(size_t i) const { return (offset_ + i) & mask_; }
-
-  void next() {
-    index_ += Width;
-    offset_ += index_;
-    offset_ &= mask_;
-  }
-  // 0-based probe index, a multiple of `Width`.
-  size_t index() const { return index_; }
-
  private:
-  size_t mask_;
-  size_t offset_;
-  size_t index_ = 0;
+  size_t bin_;
+  size_t logical_bin_count_;
 };
 
 template <class ContainerKey, class Hash, class Eq>
@@ -2804,4 +2822,4 @@ ABSL_NAMESPACE_END
 
 #undef ABSL_SWISSTABLE_ENABLE_GENERATIONS
 
-#endif  // ABSL_CONTAINER_INTERNAL_RAW_HASH_SET_H_
+#endif  // GRAVEYARD_CONTAINER_INTERNAL_RAW_HASH_SET_H_
