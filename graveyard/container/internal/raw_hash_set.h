@@ -315,7 +315,7 @@ static constexpr size_t H2(size_t hash) {
 }
 
 static constexpr size_t AlignAs(size_t size, size_t align) {
-  return (size + align - 1) & (!align + 1);
+  return (size + align - 1) & (~align + 1);
 }
 
 // A `ctrl_t` is a single control byte, which can either be
@@ -381,7 +381,7 @@ class HashTableMemory {
   static constexpr size_t kValueStart = AlignAs(kSearchDistanceStart + kSearchDistanceSize,
                                                 kSlotAlign);
 
-  static constexpr size_t kBinSize = AlignAs(kValueStart + slots_per_bin * kSlotSize, kCtrlAlign);
+  static constexpr size_t kBinSize = AlignAs(kValueStart + kSlotsPerBin * kSlotSize, kCtrlAlign);
 
   static constexpr size_t kAlignment = std::max(kCtrlAlign, std::max(kSearchDistanceAlign, kSlotAlign));
 
@@ -410,9 +410,9 @@ class HashTableMemory {
   }
 
   // Don't bother with cache alignment unless the table has several bins in it.
-  explicit HashTableMemory(size_t physical_bin_count) :memory_(std::aligned_alloc(physical_bin_count > 4 ? std::max(kCacheLineSize, kAlignment) : kAlignment,
-                                                                                  SizeOf(physical_bin_count))),
-                                                       physical_bin_count_(physical_bin_count) {
+  explicit HashTableMemory(size_t physical_bin_count) :physical_bin_count_(physical_bin_count) {
+    memory_ = static_cast<char*>(std::aligned_alloc(physical_bin_count > 4 ? std::max(kCacheLineSize, kAlignment) : kAlignment,
+                                                    SizeOf()));
   }
 
   ctrl_t* ControlOf(size_t bin_number) {
@@ -436,6 +436,10 @@ class HashTableMemory {
   const size_t SizeOf() const {
     return physical_bin_count_ * kBinSize;
   }
+  const size_t PhysicalBinCount() const {
+    return physical_bin_count_;
+  }
+  const char* RawMemory() const { return memory_; }
  private:
   char *Bin(size_t bin_number) {
     assert(bin_number < physical_bin_count_);
@@ -1967,15 +1971,14 @@ class raw_hash_set {
   }
 
   inline void destroy_slots() {
-    const size_t cap = capacity();
-    const ctrl_t* ctrl = control();
-    slot_type* slot = slot_array();
-    for (size_t i = 0; i != cap; ++i) {
-#if 0
-      if (IsFull(ctrl[i])) {
-        PolicyTraits::destroy(&alloc_ref(), slot + i);
+    for (size_t i = 0; i < hashtable_memory_.PhysicalBinCount(); ++i) {
+      ctrl_t* ctrl = hashtable_memory_.ControlOf(i);
+
+      for (size_t slotoff = 0; slotoff < kSlotsPerBin; ++slotoff) {
+        if (ctrl[slotoff].IsFull()) {
+          PolicyTraits::destroy(&alloc_ref(), hashtable_memory_.SlotOf(i, slotoff));
+        }
       }
-#endif
     }
   }
 
@@ -2809,6 +2812,11 @@ class raw_hash_set {
     };
     return value;
   }
+
+  // TODO: Facebook uses slightly different numbers for different value
+  // sizes. Look into that.
+  static constexpr size_t kSlotsPerBin = 14;
+  HashTableMemory<kSlotsPerBin, slot_type> hashtable_memory_;
 
   // Bundle together CommonFields plus other objects which might be empty.
   // CompressedTuple will ensure that sizeof is not affected by any of the empty

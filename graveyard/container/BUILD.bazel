@@ -58,6 +58,17 @@ cc_test(
     srcs = ["internal/raw_graveyard_set_test.cc"],
     deps = [
         ":raw_hash_set",
+         "//absl/log",
         "@com_google_googletest//:gtest_main",
-    ],
+   ],
+)
+
+cc_test(
+    name = "graveyard_set_test",
+    srcs = ["graveyard_set_test.cc"],
+    deps = [
+        ":flat_hash_set",
+         "//absl/log",
+        "@com_google_googletest//:gtest_main",
+   ],
 )
