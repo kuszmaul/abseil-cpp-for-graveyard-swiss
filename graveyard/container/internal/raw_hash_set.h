@@ -387,6 +387,9 @@ class HashTableMemory {
 
  public:
   HashTableMemory() = default;
+  ~HashTableMemory() {
+    assert(memory_ == nullptr);
+  }
   // No copy constructors or assignments
   HashTableMemory(const HashTableMemory&) = delete;
   HashTableMemory& operator=(const HashTableMemory&) = delete;
