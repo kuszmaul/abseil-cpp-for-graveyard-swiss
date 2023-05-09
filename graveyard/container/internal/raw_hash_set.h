@@ -189,6 +189,13 @@
 //
 // To iterate, we simply traverse the array, skipping empty slots and stopping
 // at the bin that has `is_last_bin` set.
+//
+// We need to rehash if the table becomes too full, or there have been too many
+// insertions since the last rehash (and hence the number of disordered elements
+// has gotten large and we may be running out of graveyard tombstones.)  We
+// maintain a counter, growth_left, that says how many more insertions we may do
+// before rehashing.  (Insertions decrement the counter, but deletions do not
+// increment it.)
 
 #ifndef GRAVEYARD_CONTAINER_INTERNAL_RAW_HASH_SET_H_
 #define GRAVEYARD_CONTAINER_INTERNAL_RAW_HASH_SET_H_
@@ -283,24 +290,16 @@ template <typename AllocType>
 void SwapAlloc(AllocType& /*lhs*/, AllocType& /*rhs*/,
                std::false_type /* propagate_on_container_swap */) {}
 
-// In principle, the physical bin count should be a function of the bin size and
-// the load factor.  But the bin size is always near 14 and the load factor is
-// never more than about 95%, so we can treat those as as constants.
-constexpr size_t PhysicalBinCount(size_t logical_bin_count) {
-  if (logical_bin_count < 4) {
-    // If there are only 4 bins, then no extra physical bins.  Just wrap around
-    // immediately.
-    return logical_bin_count;
-  }
-  if (logical_bin_count < 16) {
-    return logical_bin_count + 1;
-  }
-  if (logical_bin_count < 64) {
-    return logical_bin_count + 2;
-  }
-  return logical_bin_count + 3;
-}
-
+// The ordinary swiss table uses a per-table hash salt (which changes on resize)
+// so that the iterator order will change.  We may not be able to support that
+// easily for graveyard hashing, since we are relying on the ordered elements
+// being in order of increasing H1.  Also the swiss tables employ a per-process
+// ShouldInsertBackwards flag.  TODO: what kind of order fuzzing can we
+// implement for graveyard hashing?
+//
+// Extracts the H1 portion of a hash (the bin number) given the number of
+// logical bins.  We use the high order bits.  See
+// https://lemire.me/blog/2016/06/27/a-fast-alternative-to-the-modulo-reduction/
 size_t H1(size_t hash, size_t logical_bin_count) {
   if constexpr (sizeof(size_t) == 8) {
     return (absl::uint128(hash) * absl::uint128(logical_bin_count)) >> 64;
@@ -453,54 +452,30 @@ class BitMask : public NonIterableBitMask<T, SignificantBits, Shift> {
 
 using h2_t = uint8_t;
 
-// The values here are selected for maximum performance. See the static asserts
-// below for details.
-
-// A `ctrl_t` is a single control byte, which can have one of four
-// states: empty, deleted, full (which has an associated seven-bit h2_t value)
-// and the sentinel. They have the following bit patterns:
-//
-//      empty: 1 0 0 0 0 0 0 0
-//    deleted: 1 1 1 1 1 1 1 0
-//       full: 0 h h h h h h h  // h represents the hash bits.
-//   sentinel: 1 1 1 1 1 1 1 1
-//
-// These values are specifically tuned for SSE-flavored SIMD.
-// The static_asserts below detail the source of these choices.
-//
-// We use an enum class so that when strict aliasing is enabled, the compiler
-// knows ctrl_t doesn't alias other types.
-enum class ctrl_t : int8_t {
-  kEmpty = -128,   // 0b10000000
-  kDeleted = -2,   // 0b11111110
-  kSentinel = -1,  // 0b11111111
+// A `ctrl_t` is a single control byte, which can either be
+//  empty ({.is_disordered = 0, .h2 = kEmpty})
+//  full and ordered ({.is_disordered = 0, .h2 != kEmpty})
+//  full and disordered ({.is_disordered = 1, .h2 != kEmpty})
+// It cannot be disordered and empty.
+class ctrl_t {
+ public:
+  static constexpr uint8_t kEmpty = 127;
+  constexpr ctrl_t() :is_disordered_(0), h2_(kEmpty) {}
+  static constexpr ctrl_t MakeDisordered(uint8_t h2) {
+    return ctrl_t(true, h2);
+  }
+  static constexpr ctrl_t MakeOrdered(uint8_t h2) {
+    return ctrl_t(false, h2);
+  }
+  constexpr ctrl_t(bool is_disordered, uint8_t h2) :is_disordered_(is_disordered), :h2_(h2) {
+    assert(h2 < kEmpty);
+  }
+  constexpr bool IsEmpty() const { return h2_ == kEmpty; }
+  constexpr bool IsFull() const { return h2_ != kEmpty; }
+ private:
+  uint8_t is_disordered_ : 1;
+  uint8_t h2_ : 7;
 };
-static_assert(
-    (static_cast<int8_t>(ctrl_t::kEmpty) &
-     static_cast<int8_t>(ctrl_t::kDeleted) &
-     static_cast<int8_t>(ctrl_t::kSentinel) & 0x80) != 0,
-    "Special markers need to have the MSB to make checking for them efficient");
-static_assert(
-    ctrl_t::kEmpty < ctrl_t::kSentinel && ctrl_t::kDeleted < ctrl_t::kSentinel,
-    "ctrl_t::kEmpty and ctrl_t::kDeleted must be smaller than "
-    "ctrl_t::kSentinel to make the SIMD test of IsEmptyOrDeleted() efficient");
-static_assert(
-    ctrl_t::kSentinel == static_cast<ctrl_t>(-1),
-    "ctrl_t::kSentinel must be -1 to elide loading it from memory into SIMD "
-    "registers (pcmpeqd xmm, xmm)");
-static_assert(ctrl_t::kEmpty == static_cast<ctrl_t>(-128),
-              "ctrl_t::kEmpty must be -128 to make the SIMD check for its "
-              "existence efficient (psignb xmm, xmm)");
-static_assert(
-    (~static_cast<int8_t>(ctrl_t::kEmpty) &
-     ~static_cast<int8_t>(ctrl_t::kDeleted) &
-     static_cast<int8_t>(ctrl_t::kSentinel) & 0x7F) != 0,
-    "ctrl_t::kEmpty and ctrl_t::kDeleted must share an unset bit that is not "
-    "shared by ctrl_t::kSentinel to make the scalar test for "
-    "MaskEmptyOrDeleted() efficient");
-static_assert(ctrl_t::kDeleted == static_cast<ctrl_t>(-2),
-              "ctrl_t::kDeleted must be -2 to make the implementation of "
-              "ConvertSpecialToEmptyAndFullToDeleted efficient");
 
 ABSL_DLL extern const ctrl_t kEmptyGroup[16];
 
@@ -519,37 +494,6 @@ GenerationType* EmptyGeneration();
 inline bool IsEmptyGeneration(const GenerationType* generation) {
   return *generation == SentinelEmptyGeneration();
 }
-
-// Mixes a randomly generated per-process seed with `hash` and `ctrl` to
-// randomize insertion order within groups.
-bool ShouldInsertBackwards(size_t hash, const ctrl_t* ctrl);
-
-// Returns a per-table, hash salt, which changes on resize. This gets mixed into
-// H1 to randomize iteration order per-table.
-//
-// The seed consists of the ctrl_ pointer, which adds enough entropy to ensure
-// non-determinism of iteration order in most cases.
-inline size_t PerTableSalt(const ctrl_t* ctrl) {
-  // The low bits of the pointer have little or no entropy because of
-  // alignment. We shift the pointer to try to use higher entropy bits. A
-  // good number seems to be 12 bits, because that aligns with page size.
-  return reinterpret_cast<uintptr_t>(ctrl) >> 12;
-}
-// Extracts the H1 portion of a hash: 57 bits mixed with a per-table salt.
-inline size_t H1(size_t hash, const ctrl_t* ctrl) {
-  return (hash >> 7) ^ PerTableSalt(ctrl);
-}
-
-// Extracts the H2 portion of a hash: the 7 bits not used for H1.
-//
-// These are used as an occupied control byte.
-inline h2_t H2(size_t hash) { return hash & 0x7F; }
-
-// Helpers for checking the state of a control byte.
-inline bool IsEmpty(ctrl_t c) { return c == ctrl_t::kEmpty; }
-inline bool IsFull(ctrl_t c) { return c >= static_cast<ctrl_t>(0); }
-inline bool IsDeleted(ctrl_t c) { return c == ctrl_t::kDeleted; }
-inline bool IsEmptyOrDeleted(ctrl_t c) { return c < ctrl_t::kSentinel; }
 
 #ifdef ABSL_INTERNAL_HAVE_SSE2
 // Quick reference guide for intrinsics used below:
@@ -907,6 +851,77 @@ using CommonFieldsGenerationInfo = CommonFieldsGenerationInfoDisabled;
 using HashSetIteratorGenerationInfo = HashSetIteratorGenerationInfoDisabled;
 #endif
 
+#if 0
+template<size_t BinSize, class value_
+class Bin {
+  ctrl_t ctrl_[BinSize];
+  uint16_t is_last_ : 1;
+  uint16_t search_distance_ : 15;
+  Item slots_[BinSize];
+};
+
+template<size_t kSlotsPerBin, class slot_type>
+class BinPointer {
+  size_t GetSearchDistance() const {
+    return
+  }
+ private:
+  std::byte *ptr_;
+};
+#endif
+
+size_t AlignAs(size_t size, size_t align) {
+  return (size + align - 1) & (!align + 1);
+}
+
+template<class Policy>
+template<bool is_const>
+class Bin {
+  using slot_type = typename Policy::slot_type;
+  explicit Bin(char *memory) :memory_(memory);
+  const ctrl_t* GetCtrlPtr() const { return reinterpret_cast<ctrl_t*>(memory_); }
+  ctrl_t* GetCtrlPtr() { return reinterpret_cast<ctrl_t*>(memory_); }
+  slot_type* GetSlot(size_t slot_number) {
+    return reinterpet_cast<slot_type*>(memory_ + AlignAs(16, alignof(slot_type)) + slot_number * sizeof(slot_type));
+  }
+ private:
+  char *memory_;
+};
+
+template<class Policy>
+class Bins {
+ public:
+  size_t get_logical_size() { return logical_bin_count_; }
+// In principle, the physical bin count should be a function of the bin size and
+// the load factor.  But the bin size is always near 14 and the load factor is
+// never more than about 95%, so we can treat those as as constants.
+  size_t get_physical_size() const {
+    if (logical_bin_count_ < 4) {
+      return logical_bin_count_;
+    }
+    if (logical_bin_count_ < 16) {
+      return logical_bin_count_ + 1;
+    }
+    if (logical_bin_count < 64) {
+      return logical_bin_count_ + 2;
+    }
+    return logical_bin_count_ + 3;
+  }
+  const Bin& operator[](size_t index) const {
+    assert(index < get_physical_size());
+    return Bin(memory_ + Bin::Size * index);
+  }
+  Bin& operator[](size_t index) {
+    assert(index < get_physical_size());
+    return Bin(memory_ + Bin::Size * index);
+  }
+ private:
+  size_t logical_bin_count_;
+  char *memory_;
+};
+
+ABSL_DLL extern const BinMetadata<14> kEmptyBinMetadata;
+
 // CommonFields hold the fields in raw_hash_set that do not depend
 // on template parameters. This allows us to conveniently pass all
 // of this state to helper functions as a single argument.
@@ -953,25 +968,17 @@ class CommonFields : public CommonFieldsGenerationInfo {
     CommonFieldsGenerationInfo::reset_reserved_growth(reservation, size_);
   }
 
-  // TODO(b/259599413): Investigate removing some of these fields:
-  // - control/slots can be derived from each other
-  // - size can be moved into the slot array
+  // TODO: Investigate removing some of these fields:
+  //   size can be moved into the mallocated memory (with `bins_`)
 
-  // The control bytes (and, also, a pointer to the base of the backing array).
-  //
-  // This contains `capacity + 1 + NumClonedBytes()` entries, even
-  // when the table is empty (hence EmptyGroup).
-  ctrl_t* control_ = EmptyGroup();
-
-  // The beginning of the slots, located at `SlotOffset()` bytes after
-  // `control`. May be null for empty tables.
-  void* slots_ = nullptr;
+  // Always contains at least one bin (possibly EmptyBin)
+  void *bins_;
 
   // The number of filled slots.
   size_t size_ = 0;
 
   // The total number of available slots.
-  size_t capacity_ = 0;
+  size_t logical_bin_count_ = 0;
 
   // Bundle together growth_left and HashtablezInfoHandle to ensure EBO for
   // HashtablezInfoHandle when sampling is turned off.
@@ -979,75 +986,39 @@ class CommonFields : public CommonFieldsGenerationInfo {
       compressed_tuple_{0u, HashtablezInfoHandle{}};
 };
 
-// Returns he number of "cloned control bytes".
-//
-// This is the number of control bytes that are present both at the beginning
-// of the control byte array and at the end, such that we can create a
-// `Group::kWidth`-width probe window starting from any control byte.
-constexpr size_t NumClonedBytes() { return Group::kWidth - 1; }
-
 template <class Policy, class Hash, class Eq, class Alloc>
 class raw_hash_set;
 
-// Returns whether `n` is a valid capacity (i.e., number of slots).
-//
-// A valid capacity is a non-zero integer `2^m - 1`.
-inline bool IsValidCapacity(size_t n) { return ((n + 1) & n) == 0 && n > 0; }
-
-// Returns the next valid capacity after `n`.
-inline size_t NextCapacity(size_t n) {
-  assert(IsValidCapacity(n) || n == 0);
-  return n * 2 + 1;
-}
-
-// Applies the following mapping to every byte in the control array:
-//   * kDeleted -> kEmpty
-//   * kEmpty -> kEmpty
-//   * _ -> kDeleted
-// PRECONDITION:
-//   IsValidCapacity(capacity)
-//   ctrl[capacity] == ctrl_t::kSentinel
-//   ctrl[i] != ctrl_t::kSentinel for all i < capacity
-void ConvertDeletedToEmptyAndFullToDeleted(ctrl_t* ctrl, size_t capacity);
-
-// Converts `n` into the next valid capacity, per `IsValidCapacity`.
-inline size_t NormalizeCapacity(size_t n) {
-  return n ? ~size_t{} >> countl_zero(n) : 1;
-}
-
 // General notes on capacity/growth methods below:
-// - We use 7/8th as maximum load factor. For 16-wide groups, that gives an
-//   average of two empty slots per group.
-// - For (capacity+1) >= Group::kWidth, growth is 7/8*capacity.
-// - For (capacity+1) < Group::kWidth, growth == capacity. In this case, we
-//   never need to probe (the whole table fits in one group) so we don't need a
-//   load factor less than 1.
+// - We keep the load factor below `Policy::max_utilization_numerator /
+//   Policy::max_utilization_denominator`.  (Except for small capacity).
+// - The capacity is <= Policy::SlotsPerBin or a multiple of
+//   Policy::SlotsPerBin.  If the `capacity <= Policy::SlotsPerBin ` then we
+//   never need to probe (the whole table fits in one bin) so we can allow the
+//   load factor to be as high as 1.
 
-// Given `capacity`, applies the load factor; i.e., it returns the maximum
-// number of values we should put into the table before a resizing rehash.
-inline size_t CapacityToGrowth(size_t capacity) {
-  assert(IsValidCapacity(capacity));
-  // `capacity*7/8`
-  if (Group::kWidth == 8 && capacity == 7) {
-    // x-x/8 does not work when x==7.
-    return 6;
-  }
-  return capacity - capacity / 8;
+// Return the ceiling of a/b.
+constexpr size_t Ceil(size_t a, size_t b) {
+  return (a + b - 1) / b;
 }
 
-// Given `growth`, "unapplies" the load factor to find how large the capacity
-// should be to stay within the load factor.
-//
-// This might not be a valid capacity and `NormalizeCapacity()` should be
-// called on this.
-inline size_t GrowthToLowerboundCapacity(size_t growth) {
-  // `growth*8/7`
-  if (Group::kWidth == 8 && growth == 7) {
-    // x+(x-1)/7 does not work when x==7.
-    return 8;
-  }
-  return growth + static_cast<size_t>((static_cast<int64_t>(growth) - 1) / 7);
+// Return the number of bins needed for a particular size, to run at a load
+// factor.  The load factor is expressed as a ratio kNumerator/kDenominator.
+template <size_t slots_per_bin, size_t kNumerator, size_t kDenominator>
+static constexpr size_t BinCountForLoad(size_t size) {
+  // If the size is zero, we have a special case array for that
+  if (size == 0) return 0;
+  // If the size fits into one bin, then just use one bin, since there is no probing.
+  if (size <= slots_per_bin) return 1;
+  // Otherwise we want `size <= number_of_slots * kNumerator / kDenominator`.
+  //
+  // But `number_of_slots == slots_per_bin * number_of_bins`, so we want
+  //  `size <= number_of_bins * slots_per_bin * kNumerator / kDenominator`
+  // so we want
+  //  `size * kDenominator / (slots_per_bin * kNumerator) <= number_of_bins.
+  return Ceil(size * kDenominator, slots_per_bin * kNumerator);
 }
+
 
 template <class InputIter>
 size_t SelectBucketCountForIterRange(InputIter first, InputIter last,
@@ -1607,14 +1578,11 @@ class raw_hash_set {
       if (ABSL_PREDICT_FALSE(*ctrl_ == ctrl_t::kSentinel)) ctrl_ = nullptr;
     }
 
-    // We use EmptyGroup() for default-constructed iterators so that they can
-    // be distinguished from end iterators, which have nullptr ctrl_.
-    ctrl_t* ctrl_ = EmptyGroup();
-    // To avoid uninitialized member warnings, put slot_ in an anonymous union.
-    // The member is not initialized on singleton and end iterators.
-    union {
-      slot_type* slot_;
-    };
+    // The end iterator is indicated by offset_ == BinSize
+    // The default-constructed iterator has bin_ == nullptr and offset_ undefined.
+    BinPointer<kSlotsPerBin, value_type> bin_;
+    size_t offset_;
+
   };
 
   class const_iterator {
