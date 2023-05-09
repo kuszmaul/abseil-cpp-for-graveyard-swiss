@@ -52,3 +52,12 @@ cc_library(
         "//absl/utility",
     ],
 )
+
+cc_test(
+    name = "raw_graveyard_set_test",
+    srcs = ["internal/raw_graveyard_set_test.cc"],
+    deps = [
+        ":raw_hash_set",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

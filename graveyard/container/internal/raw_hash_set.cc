@@ -26,6 +26,7 @@ namespace absl {
 ABSL_NAMESPACE_BEGIN
 namespace container_internal {
 
+#if 0
 // A single block of empty control bytes for tables without any slots allocated.
 // This enables removing a branch in the hot path of find().
 alignas(16) ABSL_CONST_INIT ABSL_DLL const ctrl_t kEmptyGroup[16] = {
@@ -33,6 +34,8 @@ alignas(16) ABSL_CONST_INIT ABSL_DLL const ctrl_t kEmptyGroup[16] = {
     ctrl_t::kEmpty,    ctrl_t::kEmpty, ctrl_t::kEmpty, ctrl_t::kEmpty,
     ctrl_t::kEmpty,    ctrl_t::kEmpty, ctrl_t::kEmpty, ctrl_t::kEmpty,
     ctrl_t::kEmpty,    ctrl_t::kEmpty, ctrl_t::kEmpty, ctrl_t::kEmpty};
+#endif
+alignas(16) ABSL_CONST_INIT ABSL_DLL const ctrl_t kEmptyGroup[16];
 
 #ifdef ABSL_INTERNAL_NEED_REDUNDANT_CONSTEXPR_DECL
 constexpr size_t Group::kWidth;
@@ -83,11 +86,13 @@ bool CommonFieldsGenerationInfoEnabled::
          RehashProbabilityConstant();
 }
 
+#if 0
 bool ShouldInsertBackwards(size_t hash, const ctrl_t* ctrl) {
   // To avoid problems with weak hashes and single bit tests, we use % 13.
   // TODO(kfm,sbenza): revisit after we do unconditional mixing
   return (H1(hash, ctrl) ^ RandomSeed()) % 13 > 6;
 }
+#endif
 
 void ConvertDeletedToEmptyAndFullToDeleted(ctrl_t* ctrl, size_t capacity) {
   assert(ctrl[capacity] == ctrl_t::kSentinel);
@@ -97,7 +102,9 @@ void ConvertDeletedToEmptyAndFullToDeleted(ctrl_t* ctrl, size_t capacity) {
   }
   // Copy the cloned ctrl bytes.
   std::memcpy(ctrl + capacity + 1, ctrl, NumClonedBytes());
+#if 0
   ctrl[capacity] = ctrl_t::kSentinel;
+#endif
 }
 // Extern template instantiation for inline function.
 template FindInfo find_first_non_full(const CommonFields&, size_t);
@@ -160,7 +167,9 @@ void DropDeletesWithoutResize(CommonFields& common,
   for (size_t i = 0; i != capacity;
        ++i, slot_ptr = NextSlot(slot_ptr, slot_size)) {
     assert(slot_ptr == SlotAddress(slot_array, i, slot_size));
+#if 0
     if (!IsDeleted(ctrl[i])) continue;
+#endif
     const size_t hash = (*hasher)(set, slot_ptr);
     const FindInfo target = find_first_non_full(common, hash);
     const size_t new_i = target.offset;
@@ -181,7 +190,7 @@ void DropDeletesWithoutResize(CommonFields& common,
     }
 
     void* new_slot_ptr = SlotAddress(slot_array, new_i, slot_size);
-    if (IsEmpty(ctrl[new_i])) {
+    if (true /*IsEmpty(ctrl[new_i])*/) {
       // Transfer element to the empty spot.
       // SetCtrl poisons/unpoisons the slots so we have to call it at the
       // right time.
@@ -223,8 +232,10 @@ void EraseMetaOnly(CommonFields& c, ctrl_t* it, size_t slot_size) {
                                 empty_before.LeadingZeros() <
                             Group::kWidth;
 
+#if 0
   SetCtrl(c, index, was_never_full ? ctrl_t::kEmpty : ctrl_t::kDeleted,
           slot_size);
+#endif
   c.growth_left() += (was_never_full ? 1 : 0);
   c.infoz().RecordErase();
 }

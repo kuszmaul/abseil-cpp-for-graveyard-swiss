@@ -224,6 +224,7 @@
 #include "absl/container/internal/hash_policy_traits.h"
 #include "absl/container/internal/hashtable_debug_hooks.h"
 #include "absl/container/internal/hashtablez_sampler.h"
+#include "absl/numeric/int128.h"
 #include "absl/memory/memory.h"
 #include "absl/meta/type_traits.h"
 #include "absl/numeric/bits.h"
@@ -300,34 +301,182 @@ void SwapAlloc(AllocType& /*lhs*/, AllocType& /*rhs*/,
 // Extracts the H1 portion of a hash (the bin number) given the number of
 // logical bins.  We use the high order bits.  See
 // https://lemire.me/blog/2016/06/27/a-fast-alternative-to-the-modulo-reduction/
-size_t H1(size_t hash, size_t logical_bin_count) {
+static inline size_t H1(size_t hash, size_t logical_bin_count) {
+  static_assert(sizeof(size_t) == 4 || sizeof(size_t) == 8);
   if constexpr (sizeof(size_t) == 8) {
-    return (absl::uint128(hash) * absl::uint128(logical_bin_count)) >> 64;
+    return size_t((absl::uint128(hash) * absl::uint128(logical_bin_count)) >> 64);
   } else {
-    static_assert(sizeof(size_t) == 4);
     return (uint64_t(hash) * uint64_t(logical_bin_count)) >> 32;
   }
 }
 
-size_t H2(size_t hash) {
+static constexpr size_t H2(size_t hash) {
   return hash % 127;
 }
 
-template <size_t BinCapacity>
-class IteratorIndex {
+static constexpr size_t AlignAs(size_t size, size_t align) {
+  return (size + align - 1) & (!align + 1);
+}
+
+// A `ctrl_t` is a single control byte, which can either be
+//  empty ({.is_disordered = 0, .h2 = kEmpty})
+//  full and ordered ({.is_disordered = 0, .h2 != kEmpty})
+//  full and disordered ({.is_disordered = 1, .h2 != kEmpty})
+// It cannot be disordered and empty.
+class ctrl_t {
  public:
-  Index(size_t hash, size_t logical_bin_count)
-  size_t get_bin_number() const { return bin_; }
-  // Prefix increment
-  IteratorIndex& operator++() {
-    ++off_;
-    if (off_ > PhysicalBinCount(logical_bin_count_)) {
-      off_ = 0;
-    }
+  static constexpr uint8_t kEmpty = 127;
+  constexpr ctrl_t() :is_disordered_(0), h2_(kEmpty) {}
+  static constexpr ctrl_t MakeDisordered(uint8_t h2) {
+    return ctrl_t(true, h2);
+  }
+  static constexpr ctrl_t MakeOrdered(uint8_t h2) {
+    return ctrl_t(false, h2);
+  }
+  constexpr ctrl_t(bool is_disordered, uint8_t h2) :is_disordered_(is_disordered), h2_(h2) {
+    assert(h2 < kEmpty);
+  }
+  constexpr bool IsEmpty() const { return h2_ == kEmpty; }
+  constexpr bool IsFull() const { return h2_ != kEmpty; }
+ private:
+  uint8_t is_disordered_ : 1;
+  uint8_t h2_ : 7;
+};
+
+class search_distance_t {
+  constexpr explicit search_distance_t(bool is_end) :is_end_(is_end), search_distance_(0) {}
+  constexpr bool GetIsEnd() const { return is_end_; }
+  constexpr size_t GetSearchDistance() const { return search_distance_; }
+  void SetIsEnd(bool is_end) { is_end_ = is_end; }
+  void SetSearchDistance(size_t search_distance) {
+    search_distance_ = search_distance;
+    assert(search_distance_ == search_distance);
   }
  private:
-  size_t bin_;
-  size_t logical_bin_count_;
+  uint16_t is_end_ : 1;
+  uint16_t search_distance_ : 15;
+};
+
+// TODO: Is there an abseil cache line size constant somewhere?
+static constexpr size_t kCacheLineSize = 64;
+
+// Implement the layout
+template <size_t slots_per_bin, class slot_type>
+class HashTableMemory {
+  static constexpr size_t kSlotsPerBin = slots_per_bin;
+
+  static constexpr size_t kCtrlSize = sizeof(ctrl_t);
+  static constexpr size_t kCtrlAlign = alignof(ctrl_t);
+
+  static constexpr size_t kSearchDistanceSize = sizeof(search_distance_t);
+  static constexpr size_t kSearchDistanceAlign = alignof(search_distance_t);
+
+  static constexpr size_t kSlotSize = sizeof(slot_type);
+  static constexpr size_t kSlotAlign = alignof(slot_type);
+
+
+  static constexpr size_t kCtrlStart = 0;
+  static constexpr size_t kSearchDistanceStart = AlignAs(kCtrlStart + kSlotsPerBin * kCtrlSize,
+                                                         kSearchDistanceAlign);
+  static constexpr size_t kValueStart = AlignAs(kSearchDistanceStart + kSearchDistanceSize,
+                                                kSlotAlign);
+
+  static constexpr size_t kBinSize = AlignAs(kValueStart + slots_per_bin * kSlotSize, kCtrlAlign);
+
+  static constexpr size_t kAlignment = std::max(kCtrlAlign, std::max(kSearchDistanceAlign, kSlotAlign));
+
+ public:
+  HashTableMemory() = default;
+  // No copy constructors or assignments
+  HashTableMemory(const HashTableMemory&) = delete;
+  HashTableMemory& operator=(const HashTableMemory&) = delete;
+  // Move constructor
+  HashTableMemory(HashTableMemory&& other) :physical_bin_count_(other.physical_bin_count_), memory_(other.memory_) {
+    other.physical_bin_count_ = 0;
+    other.memory_ = nullptr;
+  }
+  // Move assignment operator
+  HashTableMemory &operator=(HashTableMemory&& other) {
+    if (this != &other) {
+      if (memory_) {
+        free(memory_);
+      }
+      physical_bin_count_ = other.physical_bin_count_;
+      memory_ = other.memory_;
+      other.physical_bin_count_ = 0;
+      other.memory_ = nullptr;
+    }
+    return *this;
+  }
+
+  // Don't bother with cache alignment unless the table has several bins in it.
+  explicit HashTableMemory(size_t physical_bin_count) :memory_(std::aligned_alloc(physical_bin_count > 4 ? std::max(kCacheLineSize, kAlignment) : kAlignment,
+                                                                                  SizeOf(physical_bin_count))),
+                                                       physical_bin_count_(physical_bin_count) {
+  }
+
+  ctrl_t* ControlOf(size_t bin_number) {
+    return reinterpret_cast<ctrl_t*>(Bin(bin_number) + kCtrlStart);
+  }
+  const ctrl_t* ControlOf(size_t bin_number) const {
+    return reinterpret_cast<ctrl_t*>(Bin(bin_number) + kCtrlStart);
+  }
+  search_distance_t* SearchDistanceOf(size_t bin_number) {
+    return reinterpret_cast<search_distance_t*>(Bin(bin_number) + kSearchDistanceStart);
+  }
+  const search_distance_t* SearchDistanceOf(size_t bin_number) const {
+    return reinterpret_cast<search_distance_t*>(Bin(bin_number) + kSearchDistanceStart);
+  }
+  slot_type* SlotOf(size_t bin_number, size_t slot_number) {
+    return reinterpret_cast<slot_type*>(Bin(bin_number) + kValueStart + slot_number * kSlotSize);
+  }
+  const slot_type* SlotOf(size_t bin_number, size_t slot_number) const {
+    return reinterpret_cast<slot_type*>(Bin(bin_number) + kValueStart + slot_number * kSlotSize);
+  }
+  const size_t SizeOf() const {
+    return physical_bin_count_ * kBinSize;
+  }
+ private:
+  char *Bin(size_t bin_number) {
+    assert(bin_number < physical_bin_count_);
+    return memory_ + bin_number * kBinSize;
+  }
+  const char *Bin(size_t bin_number) const {
+    assert(bin_number < physical_bin_count_);
+    return memory_ + bin_number * kBinSize;
+  }
+  size_t physical_bin_count_ = 0;
+  char *memory_ = nullptr;
+};
+
+template <size_t Width>
+class probe_seq {
+ public:
+  // Creates a new probe sequence using `hash` as the initial value of the
+  // sequence and `mask` (usually the capacity of the table) as the mask to
+  // apply to each value in the progression.
+  probe_seq(size_t hash, size_t mask) {
+    assert(((mask + 1) & mask) == 0 && "not a mask");
+    mask_ = mask;
+    offset_ = hash & mask_;
+  }
+
+  // The offset within the table, i.e., the value `p(i)` above.
+  size_t offset() const { return offset_; }
+  size_t offset(size_t i) const { return (offset_ + i) & mask_; }
+
+  void next() {
+    index_ += Width;
+    offset_ += index_;
+    offset_ &= mask_;
+  }
+  // 0-based probe index, a multiple of `Width`.
+  size_t index() const { return index_; }
+
+ private:
+  size_t mask_;
+  size_t offset_;
+  size_t index_ = 0;
 };
 
 template <class ContainerKey, class Hash, class Eq>
@@ -452,31 +601,6 @@ class BitMask : public NonIterableBitMask<T, SignificantBits, Shift> {
 
 using h2_t = uint8_t;
 
-// A `ctrl_t` is a single control byte, which can either be
-//  empty ({.is_disordered = 0, .h2 = kEmpty})
-//  full and ordered ({.is_disordered = 0, .h2 != kEmpty})
-//  full and disordered ({.is_disordered = 1, .h2 != kEmpty})
-// It cannot be disordered and empty.
-class ctrl_t {
- public:
-  static constexpr uint8_t kEmpty = 127;
-  constexpr ctrl_t() :is_disordered_(0), h2_(kEmpty) {}
-  static constexpr ctrl_t MakeDisordered(uint8_t h2) {
-    return ctrl_t(true, h2);
-  }
-  static constexpr ctrl_t MakeOrdered(uint8_t h2) {
-    return ctrl_t(false, h2);
-  }
-  constexpr ctrl_t(bool is_disordered, uint8_t h2) :is_disordered_(is_disordered), :h2_(h2) {
-    assert(h2 < kEmpty);
-  }
-  constexpr bool IsEmpty() const { return h2_ == kEmpty; }
-  constexpr bool IsFull() const { return h2_ != kEmpty; }
- private:
-  uint8_t is_disordered_ : 1;
-  uint8_t h2_ : 7;
-};
-
 ABSL_DLL extern const ctrl_t kEmptyGroup[16];
 
 // Returns a pointer to a control byte group that can be used by empty tables.
@@ -540,6 +664,9 @@ inline __m128i _mm_cmpgt_epi8_fixed(__m128i a, __m128i b) {
   return _mm_cmpgt_epi8(a, b);
 }
 
+// TODO: Kill this
+static constexpr uint8_t kSentinel = 42;
+
 struct GroupSse2Impl {
   static constexpr size_t kWidth = 16;  // the number of slots per group
 
@@ -569,14 +696,14 @@ struct GroupSse2Impl {
 
   // Returns a bitmask representing the positions of empty or deleted slots.
   NonIterableBitMask<uint32_t, kWidth> MaskEmptyOrDeleted() const {
-    auto special = _mm_set1_epi8(static_cast<char>(ctrl_t::kSentinel));
+    auto special = _mm_set1_epi8(static_cast<char>(kSentinel));
     return NonIterableBitMask<uint32_t, kWidth>(static_cast<uint32_t>(
         _mm_movemask_epi8(_mm_cmpgt_epi8_fixed(special, ctrl))));
   }
 
   // Returns the number of trailing empty or deleted elements in the group.
   uint32_t CountLeadingEmptyOrDeleted() const {
-    auto special = _mm_set1_epi8(static_cast<char>(ctrl_t::kSentinel));
+    auto special = _mm_set1_epi8(static_cast<char>(kSentinel));
     return TrailingZeros(static_cast<uint32_t>(
         _mm_movemask_epi8(_mm_cmpgt_epi8_fixed(special, ctrl)) + 1));
   }
@@ -870,57 +997,8 @@ class BinPointer {
 };
 #endif
 
-size_t AlignAs(size_t size, size_t align) {
-  return (size + align - 1) & (!align + 1);
-}
 
-template<class Policy>
-template<bool is_const>
-class Bin {
-  using slot_type = typename Policy::slot_type;
-  explicit Bin(char *memory) :memory_(memory);
-  const ctrl_t* GetCtrlPtr() const { return reinterpret_cast<ctrl_t*>(memory_); }
-  ctrl_t* GetCtrlPtr() { return reinterpret_cast<ctrl_t*>(memory_); }
-  slot_type* GetSlot(size_t slot_number) {
-    return reinterpet_cast<slot_type*>(memory_ + AlignAs(16, alignof(slot_type)) + slot_number * sizeof(slot_type));
-  }
- private:
-  char *memory_;
-};
-
-template<class Policy>
-class Bins {
- public:
-  size_t get_logical_size() { return logical_bin_count_; }
-// In principle, the physical bin count should be a function of the bin size and
-// the load factor.  But the bin size is always near 14 and the load factor is
-// never more than about 95%, so we can treat those as as constants.
-  size_t get_physical_size() const {
-    if (logical_bin_count_ < 4) {
-      return logical_bin_count_;
-    }
-    if (logical_bin_count_ < 16) {
-      return logical_bin_count_ + 1;
-    }
-    if (logical_bin_count < 64) {
-      return logical_bin_count_ + 2;
-    }
-    return logical_bin_count_ + 3;
-  }
-  const Bin& operator[](size_t index) const {
-    assert(index < get_physical_size());
-    return Bin(memory_ + Bin::Size * index);
-  }
-  Bin& operator[](size_t index) {
-    assert(index < get_physical_size());
-    return Bin(memory_ + Bin::Size * index);
-  }
- private:
-  size_t logical_bin_count_;
-  char *memory_;
-};
-
-ABSL_DLL extern const BinMetadata<14> kEmptyBinMetadata;
+//ABSL_DLL extern const BinMetadata<14> kEmptyBinMetadata;
 
 // CommonFields hold the fields in raw_hash_set that do not depend
 // on template parameters. This allows us to conveniently pass all
@@ -944,7 +1022,9 @@ class CommonFields : public CommonFieldsGenerationInfo {
         size_(that.size_),
         capacity_(that.capacity_),
         compressed_tuple_(that.growth_left(), std::move(that.infoz())) {
+#if 0
     that.control_ = EmptyGroup();
+#endif
     that.slots_ = nullptr;
     that.size_ = 0;
     that.capacity_ = 0;
@@ -974,12 +1054,16 @@ class CommonFields : public CommonFieldsGenerationInfo {
   // Always contains at least one bin (possibly EmptyBin)
   void *bins_;
 
+  ctrl_t *control_ = 0;
+  void *slots_ = 0;
+
   // The number of filled slots.
   size_t size_ = 0;
 
   // The total number of available slots.
   size_t logical_bin_count_ = 0;
 
+  size_t capacity_;
   // Bundle together growth_left and HashtablezInfoHandle to ensure EBO for
   // HashtablezInfoHandle when sampling is turned off.
   absl::container_internal::CompressedTuple<size_t, HashtablezInfoHandle>
@@ -1020,6 +1104,7 @@ static constexpr size_t BinCountForLoad(size_t size) {
 }
 
 
+#if 0
 template <class InputIter>
 size_t SelectBucketCountForIterRange(InputIter first, InputIter last,
                                      size_t bucket_count) {
@@ -1035,6 +1120,7 @@ size_t SelectBucketCountForIterRange(InputIter first, InputIter last,
   }
   return 0;
 }
+#endif
 
 constexpr bool SwisstableDebugEnabled() {
 #if defined(ABSL_SWISSTABLE_ENABLE_GENERATIONS) || \
@@ -1045,6 +1131,7 @@ constexpr bool SwisstableDebugEnabled() {
 #endif
 }
 
+#if 0
 inline void AssertIsFull(const ctrl_t* ctrl, GenerationType generation,
                          const GenerationType* generation_ptr,
                          const char* operation) {
@@ -1107,6 +1194,7 @@ inline void AssertIsValidForComparison(const ctrl_t* ctrl,
         "diagnose rehashing issues.");
   }
 }
+#endif
 
 // If the two iterators come from the same container, then their pointers will
 // interleave such that ctrl_a <= ctrl_b < slot_a <= slot_b or vice/versa.
@@ -1202,11 +1290,14 @@ inline bool is_small(size_t capacity) { return capacity < Group::kWidth - 1; }
 // Begins a probing operation on `common.control`, using `hash`.
 inline probe_seq<Group::kWidth> probe(const ctrl_t* ctrl, const size_t capacity,
                                       size_t hash) {
-  return probe_seq<Group::kWidth>(H1(hash, ctrl), capacity);
+  return probe_seq<Group::kWidth>(H1(hash, 12/*ctrl*/), capacity);
 }
 inline probe_seq<Group::kWidth> probe(const CommonFields& common, size_t hash) {
   return probe(common.control_, common.capacity_, hash);
 }
+
+static inline size_t NumClonedBytes() { return 0; }
+
 
 // Probes an array of control bits using a probe sequence derived from `hash`,
 // and returns the offset corresponding to the first deleted or empty slot.
@@ -1249,7 +1340,7 @@ extern template FindInfo find_first_non_full(const CommonFields&, size_t);
 FindInfo find_first_non_full_outofline(const CommonFields&, size_t);
 
 inline void ResetGrowthLeft(CommonFields& common) {
-  common.growth_left() = CapacityToGrowth(common.capacity_) - common.size_;
+  common.growth_left() = /*CapacityToGrowth*/(common.capacity_) - common.size_;
 }
 
 // Sets `ctrl` to `{kEmpty, kSentinel, ..., kEmpty}`, marking the entire
@@ -1257,9 +1348,12 @@ inline void ResetGrowthLeft(CommonFields& common) {
 inline void ResetCtrl(CommonFields& common, size_t slot_size) {
   const size_t capacity = common.capacity_;
   ctrl_t* ctrl = common.control_;
+  *ctrl = ctrl_t();
+#if 0
   std::memset(ctrl, static_cast<int8_t>(ctrl_t::kEmpty),
               capacity + 1 + NumClonedBytes());
-  ctrl[capacity] = ctrl_t::kSentinel;
+#endif
+  ctrl[capacity] = ctrl_t(); //ctrl_t::kSentinel;
   SanitizerPoisonMemoryRegion(common.slots_, slot_size * capacity);
   ResetGrowthLeft(common);
 }
@@ -1273,12 +1367,14 @@ inline void SetCtrl(const CommonFields& common, size_t i, ctrl_t h,
   const size_t capacity = common.capacity_;
   assert(i < capacity);
 
+#if 0
   auto* slot_i = static_cast<const char*>(common.slots_) + i * slot_size;
   if (IsFull(h)) {
     SanitizerUnpoisonMemoryRegion(slot_i, slot_size);
   } else {
     SanitizerPoisonMemoryRegion(slot_i, slot_size);
   }
+#endif
 
   ctrl_t* ctrl = common.control_;
   ctrl[i] = h;
@@ -1288,7 +1384,9 @@ inline void SetCtrl(const CommonFields& common, size_t i, ctrl_t h,
 // Overload for setting to an occupied `h2_t` rather than a special `ctrl_t`.
 inline void SetCtrl(const CommonFields& common, size_t i, h2_t h,
                     size_t slot_size) {
+#if 0
   SetCtrl(common, i, static_cast<ctrl_t>(h), slot_size);
+#endif
 }
 
 // Given the capacity of a table, computes the offset (from the start of the
@@ -1513,21 +1611,27 @@ class raw_hash_set {
 
     iterator() {}
 
+#if 0
     // PRECONDITION: not an end() iterator.
     reference operator*() const {
       AssertIsFull(ctrl_, generation(), generation_ptr(), "operator*()");
       return PolicyTraits::element(slot_);
     }
+#endif
 
+#if 0
     // PRECONDITION: not an end() iterator.
     pointer operator->() const {
       AssertIsFull(ctrl_, generation(), generation_ptr(), "operator->");
       return &operator*();
     }
+#endif
 
     // PRECONDITION: not an end() iterator.
     iterator& operator++() {
+#if 0
       AssertIsFull(ctrl_, generation(), generation_ptr(), "operator++");
+#endif
       ++ctrl_;
       ++slot_;
       skip_empty_or_deleted();
@@ -1541,10 +1645,12 @@ class raw_hash_set {
     }
 
     friend bool operator==(const iterator& a, const iterator& b) {
+#if 0
       AssertIsValidForComparison(a.ctrl_, a.generation(), a.generation_ptr());
       AssertIsValidForComparison(b.ctrl_, b.generation(), b.generation_ptr());
       AssertSameContainer(a.ctrl_, b.ctrl_, a.slot_, b.slot_,
                           a.generation_ptr(), b.generation_ptr());
+#endif
       return a.ctrl_ == b.ctrl_;
     }
     friend bool operator!=(const iterator& a, const iterator& b) {
@@ -1570,19 +1676,21 @@ class raw_hash_set {
     //
     // If a sentinel is reached, we null `ctrl_` out instead.
     void skip_empty_or_deleted() {
+#if 0
       while (IsEmptyOrDeleted(*ctrl_)) {
         uint32_t shift = Group{ctrl_}.CountLeadingEmptyOrDeleted();
         ctrl_ += shift;
         slot_ += shift;
       }
       if (ABSL_PREDICT_FALSE(*ctrl_ == ctrl_t::kSentinel)) ctrl_ = nullptr;
+#endif
     }
 
     // The end iterator is indicated by offset_ == BinSize
     // The default-constructed iterator has bin_ == nullptr and offset_ undefined.
-    BinPointer<kSlotsPerBin, value_type> bin_;
     size_t offset_;
-
+    char* ctrl_;
+    size_t slot_;
   };
 
   class const_iterator {
@@ -1640,7 +1748,7 @@ class raw_hash_set {
       const allocator_type& alloc = allocator_type())
       : settings_(CommonFields{}, hash, eq, alloc) {
     if (bucket_count) {
-      common().capacity_ = NormalizeCapacity(bucket_count);
+      common().capacity_ = /*NormalizeCapacity(bucket_count)*/ bucket_count;
       initialize_slots();
     }
   }
@@ -1863,9 +1971,11 @@ class raw_hash_set {
     const ctrl_t* ctrl = control();
     slot_type* slot = slot_array();
     for (size_t i = 0; i != cap; ++i) {
+#if 0
       if (IsFull(ctrl[i])) {
         PolicyTraits::destroy(&alloc_ref(), slot + i);
       }
+#endif
     }
   }
 
@@ -2185,8 +2295,8 @@ class raw_hash_set {
 
   void reserve(size_t n) {
     if (n > size() + growth_left()) {
-      size_t m = GrowthToLowerboundCapacity(n);
-      resize(NormalizeCapacity(m));
+      size_t m = n/*GrowthToLowerboundCapacity(n)*/;
+      resize(/*NormalizeCapacity*/(m));
 
       // This is after resize, to ensure that we have completed the allocation
       // and have potentially sampled the hashtable.
@@ -2508,7 +2618,7 @@ class raw_hash_set {
       drop_deletes_without_resize();
     } else {
       // Otherwise grow the container.
-      resize(NextCapacity(cap));
+      resize(/*NextCapacity*/(cap));
     }
   }
 
@@ -2577,7 +2687,7 @@ class raw_hash_set {
     if (rehash_for_bug_detection) {
       // Move to a different heap allocation in order to detect bugs.
       const size_t cap = capacity();
-      resize(growth_left() > 0 ? cap : NextCapacity(cap));
+      resize(growth_left() > 0 ? cap : /*NextCapacity*/(cap));
     }
     auto target = find_first_non_full(common(), hash);
     if (!rehash_for_bug_detection &&
@@ -2762,19 +2872,21 @@ struct HashtableDebugAccess<Set, absl::void_t<typename Set::raw_hash_set>> {
     } else {
       const ctrl_t* ctrl = c.control();
       for (size_t i = 0; i != capacity; ++i) {
+#if 0
         if (container_internal::IsFull(ctrl[i])) {
           m += Traits::space_used(c.slot_array() + i);
         }
+#endif
       }
     }
     return m;
   }
 
   static size_t LowerBoundAllocatedByteSize(size_t size) {
-    size_t capacity = GrowthToLowerboundCapacity(size);
+    size_t capacity = /*GrowthToLowerboundCapacity*/(size);
     if (capacity == 0) return 0;
     size_t m =
-        AllocSize(NormalizeCapacity(capacity), sizeof(Slot), alignof(Slot));
+        AllocSize(/*NormalizeCapacity*/(capacity), sizeof(Slot), alignof(Slot));
     size_t per_slot = Traits::space_used(static_cast<const Slot*>(nullptr));
     if (per_slot != ~size_t{}) {
       m += per_slot * size;
