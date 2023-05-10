@@ -114,7 +114,7 @@ template <class T, class Hash = absl::container_internal::hash_default_hash<T>,
           class Eq = absl::container_internal::hash_default_eq<T>,
           class Allocator = std::allocator<T>>
 class flat_hash_set
-    : public absl::container_internal::raw_hash_set<
+    : public graveyard::container_internal::raw_hash_set<
           graveyard::container_internal::FlatHashSetPolicy<T>, Hash, Eq, Allocator> {
   using Base = typename flat_hash_set::raw_hash_set;
 
@@ -462,13 +462,13 @@ class flat_hash_set
 template <typename T, typename H, typename E, typename A, typename Predicate>
 typename flat_hash_set<T, H, E, A>::size_type erase_if(
     flat_hash_set<T, H, E, A>& c, Predicate pred) {
-  return absl::container_internal::EraseIf(pred, &c);
+  return graveyard::container_internal::EraseIf(pred, &c);
 }
 
 namespace container_internal {
 
 template <class T>
-struct FlatHashSetPolicy {
+struct FlatHashSetPolicy : public GraveyardLightlyLoadedPolicy<T> {
   using slot_type = T;
   using key_type = T;
   using init_type = T;

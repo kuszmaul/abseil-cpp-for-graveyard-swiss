@@ -22,7 +22,7 @@
 #include "absl/base/dynamic_annotations.h"
 #include "absl/hash/hash.h"
 
-namespace absl {
+namespace graveyard {
 ABSL_NAMESPACE_BEGIN
 namespace container_internal {
 

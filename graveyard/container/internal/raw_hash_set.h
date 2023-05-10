@@ -246,9 +246,26 @@
 #include <arm_neon.h>
 #endif
 
-namespace absl {
+namespace graveyard {
 ABSL_NAMESPACE_BEGIN
+
+using absl::countr_zero;
+using absl::countl_zero;
+
 namespace container_internal {
+
+using absl::container_internal::Allocate;
+using absl::container_internal::CommonAccess;
+using absl::container_internal::Deallocate;
+using absl::container_internal::HashtablezInfoHandle;
+using absl::container_internal::InsertReturnType;
+using absl::container_internal::IsTransparent;
+using absl::container_internal::KeyArg;
+using absl::container_internal::node_handle;
+using absl::container_internal::SanitizerPoisonMemoryRegion;
+using absl::container_internal::SanitizerUnpoisonMemoryRegion;
+using absl::container_internal::Sample;
+using absl::container_internal::hash_policy_traits;
 
 #ifdef ABSL_SWISSTABLE_ENABLE_GENERATIONS
 #error ABSL_SWISSTABLE_ENABLE_GENERATIONS cannot be directly set
@@ -357,11 +374,24 @@ class search_distance_t {
   uint16_t search_distance_ : 15;
 };
 
-// TODO: Is there an abseil cache line size constant somewhere?
-static constexpr size_t kCacheLineSize = 64;
+template <class T>
+struct GraveyardCommonPolicy {
+  static constexpr size_t kCacheLineSize = ABSL_CACHELINE_SIZE;
+  // TODO: Consider doing F14 does, which produces slightly different
+  // `kSlotsPerBin` depending on `T`.
+  static constexpr size_t kSlotsPerBin = 14;
+};
+
+template <class T>
+struct GraveyardLightlyLoadedPolicy : public GraveyardCommonPolicy<T> {
+  static constexpr size_t kFullUtilizationNumerator = 7;
+  static constexpr size_t kFullUtilizationDenominator = 8;
+  static constexpr size_t kRehashedUtilizationNumerator = 7;
+  static constexpr size_t kRehashedUtilizationDenominator = 16;
+};
 
 // Implement the layout
-template <size_t slots_per_bin, class slot_type>
+template <size_t slots_per_bin, size_t cache_line_size, class slot_type>
 class HashTableMemory {
   static constexpr size_t kSlotsPerBin = slots_per_bin;
 
@@ -414,7 +444,7 @@ class HashTableMemory {
 
   // Don't bother with cache alignment unless the table has several bins in it.
   explicit HashTableMemory(size_t physical_bin_count) :physical_bin_count_(physical_bin_count) {
-    memory_ = static_cast<char*>(std::aligned_alloc(physical_bin_count > 4 ? std::max(kCacheLineSize, kAlignment) : kAlignment,
+    memory_ = static_cast<char*>(std::aligned_alloc(physical_bin_count > 4 ? std::max(cache_line_size, kAlignment) : kAlignment,
                                                     SizeOf()));
   }
 
@@ -797,7 +827,7 @@ struct GroupPortableImpl {
   static constexpr size_t kWidth = 8;
 
   explicit GroupPortableImpl(const ctrl_t* pos)
-      : ctrl(little_endian::Load64(pos)) {}
+      : ctrl(absl::little_endian::Load64(pos)) {}
 
   BitMask<uint64_t, kWidth, 3> Match(h2_t hash) const {
     // For the technique, see:
@@ -844,7 +874,7 @@ struct GroupPortableImpl {
     constexpr uint64_t lsbs = 0x0101010101010101ULL;
     auto x = ctrl & msbs;
     auto res = (~x + (x >> 7)) & ~lsbs;
-    little_endian::Store64(dst, res);
+    absl::little_endian::Store64(dst, res);
   }
 
   uint64_t ctrl;
@@ -1073,8 +1103,8 @@ class CommonFields : public CommonFieldsGenerationInfo {
   size_t capacity_;
   // Bundle together growth_left and HashtablezInfoHandle to ensure EBO for
   // HashtablezInfoHandle when sampling is turned off.
-  absl::container_internal::CompressedTuple<size_t, HashtablezInfoHandle>
-      compressed_tuple_{0u, HashtablezInfoHandle{}};
+  absl::container_internal::CompressedTuple<size_t, absl::container_internal::HashtablezInfoHandle>
+      compressed_tuple_{0u, absl::container_internal::HashtablezInfoHandle{}};
 };
 
 template <class Policy, class Hash, class Eq, class Alloc>
@@ -1093,8 +1123,9 @@ constexpr size_t Ceil(size_t a, size_t b) {
   return (a + b - 1) / b;
 }
 
-// Return the number of bins needed for a particular size, to run at a load
-// factor.  The load factor is expressed as a ratio kNumerator/kDenominator.
+// Return the number of logical bins needed for a particular size, to run at a
+// load factor.  The load factor is expressed as a ratio
+// kNumerator/kDenominator.
 template <size_t slots_per_bin, size_t kNumerator, size_t kDenominator>
 static constexpr size_t BinCountForLoad(size_t size) {
   // If the size is zero, we have a special case array for that
@@ -1977,7 +2008,7 @@ class raw_hash_set {
     for (size_t i = 0; i < hashtable_memory_.PhysicalBinCount(); ++i) {
       ctrl_t* ctrl = hashtable_memory_.ControlOf(i);
 
-      for (size_t slotoff = 0; slotoff < kSlotsPerBin; ++slotoff) {
+      for (size_t slotoff = 0; slotoff < PolicyTraits::kSlotsPerBin; ++slotoff) {
         if (ctrl[slotoff].IsFull()) {
           PolicyTraits::destroy(&alloc_ref(), hashtable_memory_.SlotOf(i, slotoff));
         }
@@ -2658,6 +2689,11 @@ class raw_hash_set {
     return *this;
   }
 
+ private:
+  static constexpr size_t SizeAfterRehash(size_t size) {
+    return Ceil(size * PolicyTraits::kRehashedUtilizationNumerator, PolicyTraits::kRehashedUtilizationDenominator);
+  }
+
  protected:
   // Attempts to find `key` in the table; if it isn't found, returns a slot that
   // the value can be inserted into, with the control byte already set to
@@ -2683,17 +2719,20 @@ class raw_hash_set {
     return {prepare_insert(hash), true};
   }
 
-  // Given the hash of a value not currently in the table, finds the next
-  // viable slot index to insert it at.
+  // Given the hash of a value not currently in the table, finds the next viable
+  // slot index to insert it at.  Updates the metadata to indicate that the slot
+  // contains a value with `hash`.
   //
   // REQUIRES: At least one non-full slot available.
   size_t prepare_insert(size_t hash) ABSL_ATTRIBUTE_NOINLINE {
+    // TODO: The should_rehash_for_bug_detection_on_insert() code should just be
+    // removed, and w should simply set up growth_left() to be a smaller value
+    // when we are doing this kind of fuzzing.
     const bool rehash_for_bug_detection =
         common().should_rehash_for_bug_detection_on_insert();
     if (rehash_for_bug_detection) {
       // Move to a different heap allocation in order to detect bugs.
-      const size_t cap = capacity();
-      resize(growth_left() > 0 ? cap : /*NextCapacity*/(cap));
+      resize(growth_left() > 0 ? capacity() : SizeAfterRehash(common().size_));
     }
     auto target = find_first_non_full(common(), hash);
     if (!rehash_for_bug_detection &&
@@ -2816,10 +2855,7 @@ class raw_hash_set {
     return value;
   }
 
-  // TODO: Facebook uses slightly different numbers for different value
-  // sizes. Look into that.
-  static constexpr size_t kSlotsPerBin = 14;
-  HashTableMemory<kSlotsPerBin, slot_type> hashtable_memory_;
+  HashTableMemory<PolicyTraits::kSlotsPerBin, PolicyTraits::kCacheLineSize, slot_type> hashtable_memory_;
 
   // Bundle together CommonFields plus other objects which might be empty.
   // CompressedTuple will ensure that sizeof is not affected by any of the empty
