@@ -51,10 +51,7 @@ namespace graveyard {
 ABSL_NAMESPACE_BEGIN
 namespace container_internal {
 template <typename T>
-struct FlatHashSetPolicy;
-}  // namespace container_internal
-
-namespace container_internal {
+struct GraveyardFlatHashSetPolicy;
 }  // namespace container_internal
 
 // -----------------------------------------------------------------------------
@@ -115,8 +112,10 @@ template <class T, class Hash = absl::container_internal::hash_default_hash<T>,
           class Allocator = std::allocator<T>>
 class flat_hash_set
     : public graveyard::container_internal::raw_hash_set<
-          graveyard::container_internal::FlatHashSetPolicy<T>, Hash, Eq, Allocator> {
+            graveyard::container_internal::GraveyardFlatHashSetPolicy<T>, Hash, Eq, Allocator> {
   using Base = typename flat_hash_set::raw_hash_set;
+
+  static_assert(graveyard::container_internal::GraveyardFlatHashSetPolicy<T>::kSlotsPerBin == 14);
 
  public:
   // Constructors and Assignment Operators
@@ -468,7 +467,8 @@ typename flat_hash_set<T, H, E, A>::size_type erase_if(
 namespace container_internal {
 
 template <class T>
-struct FlatHashSetPolicy : public GraveyardLightlyLoadedPolicy<T> {
+struct GraveyardFlatHashSetPolicy : public GraveyardLightlyLoadedPolicy<T> {
+
   using slot_type = T;
   using key_type = T;
   using init_type = T;
@@ -497,6 +497,7 @@ struct FlatHashSetPolicy : public GraveyardLightlyLoadedPolicy<T> {
 
   static size_t space_used(const T*) { return 0; }
 };
+
 }  // namespace container_internal
 
 }  // namespace graveyard

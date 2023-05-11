@@ -37,7 +37,7 @@ cc_library(
         "//absl/container:compressed_tuple",
         "//absl/container:container_memory",
         "//absl/container:hash_policy_traits",
-        "//absl/container:hashtable_debug_hooks",
+        ":hashtable_debug_hooks",
         "//absl/container:hashtablez_sampler",
         "//absl/base:config",
         "//absl/base:core_headers",
@@ -71,4 +71,11 @@ cc_test(
          "//absl/log",
         "@com_google_googletest//:gtest_main",
    ],
+)
+cc_library(
+    name = "hashtable_debug_hooks",
+    hdrs = ["internal/hashtable_debug_hooks.h"],
+    deps = [
+        "//absl/base:config",
+    ],
 )

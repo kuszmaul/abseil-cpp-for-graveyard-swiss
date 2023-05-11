@@ -106,13 +106,6 @@ void ConvertDeletedToEmptyAndFullToDeleted(ctrl_t* ctrl, size_t capacity) {
   ctrl[capacity] = ctrl_t::kSentinel;
 #endif
 }
-// Extern template instantiation for inline function.
-template FindInfo find_first_non_full(const CommonFields&, size_t);
-
-FindInfo find_first_non_full_outofline(const CommonFields& common,
-                                       size_t hash) {
-  return find_first_non_full(common, hash);
-}
 
 // Return address of the ith slot in slots where each slot occupies slot_size.
 static inline void* SlotAddress(void* slot_array, size_t slot,
@@ -131,89 +124,6 @@ static inline void* NextSlot(void* slot, size_t slot_size) {
 // has the specified size.
 static inline void* PrevSlot(void* slot, size_t slot_size) {
   return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(slot) - slot_size);
-}
-
-void DropDeletesWithoutResize(CommonFields& common,
-                              const PolicyFunctions& policy, void* tmp_space) {
-  void* set = &common;
-  void* slot_array = common.slots_;
-  const size_t capacity = common.capacity_;
-  assert(IsValidCapacity(capacity));
-  assert(!is_small(capacity));
-  // Algorithm:
-  // - mark all DELETED slots as EMPTY
-  // - mark all FULL slots as DELETED
-  // - for each slot marked as DELETED
-  //     hash = Hash(element)
-  //     target = find_first_non_full(hash)
-  //     if target is in the same group
-  //       mark slot as FULL
-  //     else if target is EMPTY
-  //       transfer element to target
-  //       mark slot as EMPTY
-  //       mark target as FULL
-  //     else if target is DELETED
-  //       swap current element with target element
-  //       mark target as FULL
-  //       repeat procedure for current slot with moved from element (target)
-  ctrl_t* ctrl = common.control_;
-  ConvertDeletedToEmptyAndFullToDeleted(ctrl, capacity);
-  auto hasher = policy.hash_slot;
-  auto transfer = policy.transfer;
-  const size_t slot_size = policy.slot_size;
-
-  size_t total_probe_length = 0;
-  void* slot_ptr = SlotAddress(slot_array, 0, slot_size);
-  for (size_t i = 0; i != capacity;
-       ++i, slot_ptr = NextSlot(slot_ptr, slot_size)) {
-    assert(slot_ptr == SlotAddress(slot_array, i, slot_size));
-#if 0
-    if (!IsDeleted(ctrl[i])) continue;
-#endif
-    const size_t hash = (*hasher)(set, slot_ptr);
-    const FindInfo target = find_first_non_full(common, hash);
-    const size_t new_i = target.offset;
-    total_probe_length += target.probe_length;
-
-    // Verify if the old and new i fall within the same group wrt the hash.
-    // If they do, we don't need to move the object as it falls already in the
-    // best probe we can.
-    const size_t probe_offset = probe(common, hash).offset();
-    const auto probe_index = [probe_offset, capacity](size_t pos) {
-      return ((pos - probe_offset) & capacity) / Group::kWidth;
-    };
-
-    // Element doesn't move.
-    if (ABSL_PREDICT_TRUE(probe_index(new_i) == probe_index(i))) {
-      SetCtrl(common, i, H2(hash), slot_size);
-      continue;
-    }
-
-    void* new_slot_ptr = SlotAddress(slot_array, new_i, slot_size);
-    if (true /*IsEmpty(ctrl[new_i])*/) {
-      // Transfer element to the empty spot.
-      // SetCtrl poisons/unpoisons the slots so we have to call it at the
-      // right time.
-      SetCtrl(common, new_i, H2(hash), slot_size);
-      (*transfer)(set, new_slot_ptr, slot_ptr);
-      SetCtrl(common, i, ctrl_t::kEmpty, slot_size);
-    } else {
-      assert(IsDeleted(ctrl[new_i]));
-      SetCtrl(common, new_i, H2(hash), slot_size);
-      // Until we are done rehashing, DELETED marks previously FULL slots.
-
-      // Swap i and new_i elements.
-      (*transfer)(set, tmp_space, new_slot_ptr);
-      (*transfer)(set, new_slot_ptr, slot_ptr);
-      (*transfer)(set, slot_ptr, tmp_space);
-
-      // repeat the processing of the ith slot
-      --i;
-      slot_ptr = PrevSlot(slot_ptr, slot_size);
-    }
-  }
-  ResetGrowthLeft(common);
-  common.infoz().RecordRehash(total_probe_length);
 }
 
 void EraseMetaOnly(CommonFields& c, ctrl_t* it, size_t slot_size) {
