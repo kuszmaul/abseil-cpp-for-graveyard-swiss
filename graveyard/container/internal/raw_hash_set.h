@@ -449,7 +449,12 @@ class HashTableMemory {
   }
 
   // Don't bother with cache alignment unless the table has several bins in it.
-  explicit HashTableMemory(size_t physical_bin_count) :physical_bin_count_(physical_bin_count) {
+  explicit HashTableMemory(size_t physical_bin_count) {
+    AllocateMemory(physical_bin_count);
+  }
+  void AllocateMemory(size_t physical_bin_count) {
+    physical_bin_count_ = physical_bin_count;
+    assert(memory_ == nullptr);
     // TODO: Use Allocate
     memory_ = static_cast<char*>(std::aligned_alloc(physical_bin_count > 4 ? std::max(kCacheLineSize, kAlignment) : kAlignment,
                                                     SizeOf()));
@@ -494,6 +499,9 @@ class HashTableMemory {
     const ctrl_t* get_control() const {
       return reinterpret_cast<ctrl_t*>(bin_);
     }
+    ctrl_t* get_control() {
+      return reinterpret_cast<ctrl_t*>(bin_);
+    }
     size_t get_search_distance() const {
       return reinterpret_cast<search_distance_t*>(bin_ + kSearchDistanceStart)->GetSearchDistance();
     }
@@ -507,6 +515,9 @@ class HashTableMemory {
       return reinterpret_cast<search_distance_t*>(bin_ + kSearchDistanceStart)->GetIsEnd();
     }
     const slot_type* get_slot(size_t slot_in_bin) const {
+      return bin_ + kValueStart + slot_in_bin * kSlotSize;
+    }
+    slot_type* get_slot(size_t slot_in_bin) {
       return bin_ + kValueStart + slot_in_bin * kSlotSize;
     }
     BinPointer& operator++() {
@@ -1554,6 +1565,7 @@ class raw_hash_set {
   using PolicyTraits = absl::container_internal::hash_policy_traits<Policy>;
   using KeyArgImpl =
       KeyArg<IsTransparent<Eq>::value && IsTransparent<Hash>::value>;
+  using Memory = HashTableMemory<Policy>;
 
  public:
   using init_type = typename PolicyTraits::init_type;
@@ -2556,35 +2568,44 @@ class raw_hash_set {
         common(), CharAlloc(alloc_ref()));
   }
 
-  ABSL_ATTRIBUTE_NOINLINE void resize(size_t new_capacity) {
-    assert(IsValidCapacity(new_capacity));
-    auto* old_ctrl = control();
-    auto* old_slots = slot_array();
-    const size_t old_capacity = common().capacity_;
-    common().capacity_ = new_capacity;
-    initialize_slots();
-
-    auto* new_slots = slot_array();
+  private:
+  void resize_to_size(size_t new_size) {
     size_t total_probe_length = 0;
-    for (size_t i = 0; i != old_capacity; ++i) {
-      if (IsFull(old_ctrl[i])) {
-        size_t hash = PolicyTraits::apply(HashElement{hash_ref()},
-                                          PolicyTraits::element(old_slots + i));
-        auto target = find_first_non_full(common(), hash);
-        size_t new_i = target.offset;
-        total_probe_length += target.probe_length;
-        SetCtrl(common(), new_i, H2(hash), sizeof(slot_type));
-        PolicyTraits::transfer(&alloc_ref(), new_slots + new_i, old_slots + i);
+    Memory old_memory = std::move(hashtable_memory_);
+    // TODO: This isn't right:   This formula is for
+    hashtable_memory_.AllocateMemory(BinCountForLoad<Policy::kSlotsPerBin, Policy::kFullUtilizationNumerator, Policy::kFullUtilizationDenominator>(new_size));
+    common().capacity_ = hashtable_memory_.GetLogicalBinCount * Policy::kSlotsPerBin;
+    initialize_slots();
+    for (typename Memory::BinPointer bin_pointer = old_memory.MakeBinPointer(0); true; ++bin_pointer) {
+      ctrl_t* ctrl = bin_pointer.get_control();
+      for (size_t slot_in_bin = 0; slot_in_bin < Policy::kSlotsPerBin; ++slot_in_bin) {
+        if (ctrl[slot_in_bin].IsFull()) {
+          size_t hash = PolicyTraits::apply(HashElement{hash_ref()},
+                                            PolicyTraits::element(bin_pointer.get_slot(slot_in_bin)));
+          auto [dest_bin_pointer, dest_slot_in_bin, probe_length] = hashtable_memory_.find_first_empty(hash);
+          total_probe_length += probe_length;
+          dest_bin_pointer.get_control()[dest_slot_in_bin] = ctrl_t::MakeDisordered(H2(hash));
+          PolicyTraits::transfer(&alloc_ref(), dest_bin_pointer.get_slot(dest_slot_in_bin), bin_pointer.get_slot(slot_in_bin));
+          bin_pointer.get_control()[slot_in_bin] = ctrl_t{};
+        }
       }
-    }
-    if (old_capacity) {
-      SanitizerUnpoisonMemoryRegion(old_slots,
-                                    sizeof(slot_type) * old_capacity);
-      Deallocate<alignof(slot_type)>(
-          &alloc_ref(), old_ctrl,
-          AllocSize(old_capacity, sizeof(slot_type), alignof(slot_type)));
+      if (bin_pointer.get_is_end()) {
+        break;
+      }
+      // TODO:  The analogous thing to this:
+      // SanitizerUnpoisonMemoryRegion(old_slots,
+      //    sizeof(slot_type) * old_capacity);
+      old_memory.Deallocate();
     }
     infoz().RecordRehash(total_probe_length);
+  }
+
+ public:
+  ABSL_ATTRIBUTE_NOINLINE void resize(size_t new_capacity) {
+    if (new_capacity == 0) {
+      new_capacity = 1;
+    }
+    resize_to_size(Ceil(new_capacity * Policy::kFullUtilizationNumerator, Policy::kFullUtilizationDenominator));
   }
 
   bool has_element(const value_type& elem) const {
@@ -2781,7 +2802,7 @@ class raw_hash_set {
     return value;
   }
 
-  HashTableMemory<Policy> hashtable_memory_;
+  Memory hashtable_memory_;
 
   // Bundle together CommonFields plus other objects which might be empty.
   // CompressedTuple will ensure that sizeof is not affected by any of the empty
