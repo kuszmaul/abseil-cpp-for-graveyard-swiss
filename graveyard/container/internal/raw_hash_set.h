@@ -2393,6 +2393,7 @@ class raw_hash_set {
     size_t search_distance = bin_pointer.get_search_distance();
     for (size_t bin_offset = 0; bin_offset < search_distance; ++bin_offset, ++bin_pointer) {
       const ctrl_t *ctrl = bin_pointer.get_control();
+      // TODO: Vectorize this
       for (size_t slot_in_bin = 0; slot_in_bin < Policy::kSlotsPerBin; ++slot_in_bin) {
         const ctrl_t ctrl_of_slot = ctrl[slot_in_bin];
         if (ctrl_of_slot.IsFull() && ctrl_of_slot.H2() == h2 &&
@@ -2610,18 +2611,21 @@ class raw_hash_set {
 
   bool has_element(const value_type& elem) const {
     size_t hash = PolicyTraits::apply(HashElement{hash_ref()}, elem);
-    auto seq = probe(common(), hash);
-    const ctrl_t* ctrl = control();
-    while (true) {
-      Group g{ctrl + seq.offset()};
-      for (uint32_t i : g.Match(H2(hash))) {
-        if (ABSL_PREDICT_TRUE(
-                PolicyTraits::element(slot_array() + seq.offset(i)) == elem))
+    size_t h1 = hashtable_memory_.GetH1(hash);
+    size_t h2 = H2(hash);
+    auto bin_pointer = hashtable_memory_.MakeBinPointer(h1);
+    size_t search_distance = bin_pointer.get_search_distance();
+    for (size_t bin_offset = 0; bin_offset < search_distance; ++bin_offset, ++bin_pointer) {
+      // TODO: Vectorize this
+      const ctrl_t *ctrl = bin_pointer.get_control();
+      for (size_t slot_in_bin = 0; slot_in_bin < Policy::kSlotsPerBin; ++slot_in_bin) {
+        const ctrl_t ctrl_of_slot = ctrl[slot_in_bin];
+        if (ctrl_of_slot.IsFull() && ctrl_of_slot.H2() == h2 &&
+            ABSL_PREDICT_TRUE(eq_ref()(elem,
+                                       PolicyTraits::element(bin_pointer.get_slot(slot_in_bin))))) {
           return true;
+        }
       }
-      if (ABSL_PREDICT_TRUE(g.MaskEmpty())) return false;
-      seq.next();
-      assert(seq.index() <= capacity() && "full table!");
     }
     return false;
   }
@@ -2656,10 +2660,10 @@ class raw_hash_set {
     while (true) {
       Group g{ctrl + seq.offset()};
       for (uint32_t i : g.Match(H2(hash))) {
-        if (ABSL_PREDICT_TRUE(PolicyTraits::apply(
-                EqualElement<K>{key, eq_ref()},
-                PolicyTraits::element(slot_array() + seq.offset(i)))))
+        if (ABSL_PREDICT_TRUE(eq_ref()(key,
+                                       PolicyTraits::element(slot_array() + seq.offset(i))))) {
           return {seq.offset(i), false};
+        }
       }
       if (ABSL_PREDICT_TRUE(g.MaskEmpty())) break;
       seq.next();
