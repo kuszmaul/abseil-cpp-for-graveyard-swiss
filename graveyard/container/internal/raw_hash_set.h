@@ -362,6 +362,7 @@ class ctrl_t {
 };
 
 class search_distance_t {
+ public:
   constexpr explicit search_distance_t(bool is_end) :is_end_(is_end), search_distance_(0) {}
   constexpr bool GetIsEnd() const { return is_end_; }
   constexpr size_t GetSearchDistance() const { return search_distance_; }
@@ -496,6 +497,7 @@ class HashTableMemory {
     memory_ = nullptr;
   }
   class BinPointer {
+   public:
     const ctrl_t* get_control() const {
       return reinterpret_cast<ctrl_t*>(bin_);
     }
@@ -518,19 +520,23 @@ class HashTableMemory {
       return bin_ + kValueStart + slot_in_bin * kSlotSize;
     }
     slot_type* get_slot(size_t slot_in_bin) {
-      return bin_ + kValueStart + slot_in_bin * kSlotSize;
+      return reinterpret_cast<slot_type*>(bin_ + kValueStart + slot_in_bin * kSlotSize);
     }
     BinPointer& operator++() {
       bin_ += kBinSize;
       return *this;
     }
+    bool is_default_constructed() const {
+      return bin_ == nullptr;
+    }
    private:
     friend HashTableMemory;
     explicit BinPointer(char *bin) :bin_(bin) {}
-    char *bin_;
+    // The default-constructed bin-pointer is nullptr.
+    char *bin_ = nullptr;
   };
   BinPointer MakeBinPointer(size_t bin_number) {
-    return BinPointer(ControlOf(bin_number));
+    return BinPointer(Bin(bin_number));
   }
   struct FindInfo {
     BinPointer bin_pointer;
@@ -1228,43 +1234,11 @@ constexpr bool SwisstableDebugEnabled() {
 }
 
 #if 0
-inline void AssertIsFull(const ctrl_t* ctrl, GenerationType generation,
-                         const GenerationType* generation_ptr,
+inline void AssertIsFull(const const_iterator it,
                          const char* operation) {
-  if (!SwisstableDebugEnabled()) return;
-  if (ctrl == nullptr) {
-    ABSL_INTERNAL_LOG(FATAL,
-                      std::string(operation) + " called on end() iterator.");
-  }
-  if (ctrl == EmptyGroup()) {
-    ABSL_INTERNAL_LOG(FATAL, std::string(operation) +
-                                 " called on default-constructed iterator.");
-  }
-  if (SwisstableGenerationsEnabled()) {
-    if (generation != *generation_ptr) {
-      ABSL_INTERNAL_LOG(FATAL,
-                        std::string(operation) +
-                            " called on invalid iterator. The table could have "
-                            "rehashed since this iterator was initialized.");
-    }
-    if (!IsFull(*ctrl)) {
-      ABSL_INTERNAL_LOG(
-          FATAL,
-          std::string(operation) +
-              " called on invalid iterator. The element was likely erased.");
-    }
-  } else {
-    if (!IsFull(*ctrl)) {
-      ABSL_INTERNAL_LOG(
-          FATAL,
-          std::string(operation) +
-              " called on invalid iterator. The element might have been erased "
-              "or the table might have rehashed. Consider running with "
-              "--config=asan to diagnose rehashing issues.");
-    }
-  }
 }
-
+#endif
+#if 0
 // Note that for comparisons, null/end iterators are valid.
 inline void AssertIsValidForComparison(const ctrl_t* ctrl,
                                        GenerationType generation,
@@ -1566,6 +1540,7 @@ class raw_hash_set {
   using KeyArgImpl =
       KeyArg<IsTransparent<Eq>::value && IsTransparent<Hash>::value>;
   using Memory = HashTableMemory<Policy>;
+  using BinPointer = typename Memory::BinPointer;
 
  public:
   using init_type = typename PolicyTraits::init_type;
@@ -1646,6 +1621,7 @@ class raw_hash_set {
 
    public:
     using iterator_category = std::forward_iterator_tag;
+    using slot_type  = typename raw_hash_set::slot_type;
     using value_type = typename raw_hash_set::value_type;
     using reference =
         absl::conditional_t<PolicyTraits::constant_iterators::value,
@@ -1655,13 +1631,14 @@ class raw_hash_set {
 
     iterator() {}
 
-#if 0
     // PRECONDITION: not an end() iterator.
     reference operator*() const {
-      AssertIsFull(ctrl_, generation(), generation_ptr(), "operator*()");
-      return PolicyTraits::element(slot_);
+      AssertIsFull("operator*()");
+      return PolicyTraits::element(bin_.get_slot(slot_in_bin_));
     }
-#endif
+    slot_type* get_slot() {
+      bin_.get_slot(slot_in_bin_);
+    }
 
 #if 0
     // PRECONDITION: not an end() iterator.
@@ -1676,8 +1653,11 @@ class raw_hash_set {
 #if 0
       AssertIsFull(ctrl_, generation(), generation_ptr(), "operator++");
 #endif
-      ++ctrl_;
-      ++slot_;
+      ++slot_in_bin_;
+      if (slot_in_bin_ == Policy::kSlotsPerBin && !bin_.get_is_end()) {
+        ++bin_;
+        slot_in_bin_ = 0;
+      }
       skip_empty_or_deleted();
       return *this;
     }
@@ -1701,19 +1681,54 @@ class raw_hash_set {
       return !(a == b);
     }
 
+    void AssertIsFull(const char *operation) const {
+      if (!SwisstableDebugEnabled()) return;
+      if (bin_.is_default_constructed()) {
+        ABSL_INTERNAL_LOG(FATAL, std::string(operation) +
+                          " called on default-constructed iterator.");
+      }
+      if (slot_in_bin_ == Policy::kSlotsPerBin && !bin_.get_is_end()) {
+        ABSL_INTERNAL_LOG(FATAL,
+                          std::string(operation) + " called on end() iterator.");
+      }
+      if (SwisstableGenerationsEnabled()) {
+        if (generation() != *generation_ptr()) {
+          ABSL_INTERNAL_LOG(FATAL,
+                            std::string(operation) +
+                            " called on invalid iterator. The table could have "
+                            "rehashed since this iterator was initialized.");
+        }
+        if (bin_.get_control()[slot_in_bin_].IsEmpty()) {
+          ABSL_INTERNAL_LOG(
+              FATAL,
+              std::string(operation) +
+              " called on invalid iterator. The element was likely erased.");
+        }
+      } else {
+        if (bin_.get_control()[slot_in_bin_].IsEmpty()) {
+          ABSL_INTERNAL_LOG(
+              FATAL,
+              std::string(operation) +
+              " called on invalid iterator. The element might have been erased "
+              "or the table might have rehashed. Consider running with "
+              "--config=asan to diagnose rehashing issues.");
+        }
+      }
+    }
+
    private:
-    iterator(ctrl_t* ctrl, slot_type* slot,
+    iterator(BinPointer bin, size_t slot_in_bin,
              const GenerationType* generation_ptr)
         : HashSetIteratorGenerationInfo(generation_ptr),
-          ctrl_(ctrl),
-          slot_(slot) {
+          bin_(bin),
+          slot_in_bin_(slot_in_bin) {
       // This assumption helps the compiler know that any non-end iterator is
       // not equal to any end iterator.
-      ABSL_ASSUME(ctrl != nullptr);
+      ABSL_ASSUME(bin_.get_control() != nullptr);
     }
     // For end() iterators.
     explicit iterator(const GenerationType* generation_ptr)
-        : HashSetIteratorGenerationInfo(generation_ptr), ctrl_(nullptr) {}
+        : HashSetIteratorGenerationInfo(generation_ptr) {}
 
     // Fixes up `ctrl_` to point to a full by advancing it and `slot_` until
     // they reach one.
@@ -1730,11 +1745,13 @@ class raw_hash_set {
 #endif
     }
 
-    // The end iterator is indicated by offset_ == BinSize
-    // The default-constructed iterator has bin_ == nullptr and offset_ undefined.
-    size_t offset_;
-    char* ctrl_;
-    size_t slot_;
+    // The end iterator has slot_in_bin_ == kSlotsPerBin and bin_ pointing to a
+    // bin that has "is_last" set.
+    //
+    // The default-constructed iterator has a null bin_ (a default-constructed
+    // BinPointer).
+    BinPointer bin_;
+    size_t slot_in_bin_;
   };
 
   class const_iterator {
@@ -2009,7 +2026,7 @@ class raw_hash_set {
   }
 
   inline void destroy_slots() {
-    for (size_t i = 0; i < hashtable_memory_.PhysicalBinCount(); ++i) {
+    for (size_t i = 0; i < hashtable_memory_.GetPhysicalBinCount(); ++i) {
       ctrl_t* ctrl = hashtable_memory_.ControlOf(i);
 
       for (size_t slotoff = 0; slotoff < Policy::kSlotsPerBin; ++slotoff) {
@@ -2523,7 +2540,7 @@ class raw_hash_set {
       if (res.second) {
         s.emplace_at(res.first, std::forward<Args>(args)...);
       }
-      return {s.iterator_at(res.first), res.second};
+      return res;
     }
     raw_hash_set& s;
   };
@@ -2577,7 +2594,7 @@ class raw_hash_set {
     hashtable_memory_.AllocateMemory(BinCountForLoad<Policy::kSlotsPerBin, Policy::kFullUtilizationNumerator, Policy::kFullUtilizationDenominator>(new_size));
     common().capacity_ = hashtable_memory_.GetLogicalBinCount * Policy::kSlotsPerBin;
     initialize_slots();
-    for (typename Memory::BinPointer bin_pointer = old_memory.MakeBinPointer(0); true; ++bin_pointer) {
+    for (BinPointer bin_pointer = old_memory.MakeBinPointer(0); true; ++bin_pointer) {
       ctrl_t* ctrl = bin_pointer.get_control();
       for (size_t slot_in_bin = 0; slot_in_bin < Policy::kSlotsPerBin; ++slot_in_bin) {
         if (ctrl[slot_in_bin].IsFull()) {
@@ -2652,24 +2669,27 @@ class raw_hash_set {
   // the value can be inserted into, with the control byte already set to
   // `key`'s H2.
   template <class K>
-  std::pair<size_t, bool> find_or_prepare_insert(const K& key) {
+  std::pair<iterator, bool> find_or_prepare_insert(const K& key) {
     prefetch_heap_block();
     auto hash = hash_ref()(key);
-    auto seq = probe(common(), hash);
-    const ctrl_t* ctrl = control();
-    while (true) {
-      Group g{ctrl + seq.offset()};
-      for (uint32_t i : g.Match(H2(hash))) {
-        if (ABSL_PREDICT_TRUE(eq_ref()(key,
-                                       PolicyTraits::element(slot_array() + seq.offset(i))))) {
-          return {seq.offset(i), false};
+    size_t h1 = hashtable_memory_.GetH1(hash);
+    size_t h2 = H2(hash);
+    auto bin_pointer = hashtable_memory_.MakeBinPointer(h1);
+    size_t search_distance = bin_pointer.get_search_distance();
+    for (size_t bin_offset = 0; bin_offset < search_distance; ++bin_offset, ++bin_pointer) {
+      const ctrl_t *ctrl = bin_pointer.get_control();
+      // TODO: Vectorize this
+      for (size_t slot_in_bin = 0; slot_in_bin < Policy::kSlotsPerBin; ++slot_in_bin) {
+        const ctrl_t ctrl_of_slot = ctrl[slot_in_bin];
+        if (ctrl_of_slot.IsFull() && ctrl_of_slot.H2() == h2 &&
+            ABSL_PREDICT_TRUE(PolicyTraits::apply(
+                EqualElement<K>{key, eq_ref()},
+                PolicyTraits::element(bin_pointer.get_slot(slot_in_bin))))) {
+          return {iterator_at(bin_pointer, slot_in_bin), false};
         }
       }
-      if (ABSL_PREDICT_TRUE(g.MaskEmpty())) break;
-      seq.next();
-      assert(seq.index() <= capacity() && "full table!");
     }
-    return {prepare_insert(hash), true};
+    return {prepare_insert(hash, h2), true};
   }
 
   // Given the hash of a value not currently in the table, finds the next viable
@@ -2677,7 +2697,7 @@ class raw_hash_set {
   // contains a value with `hash`.
   //
   // REQUIRES: At least one non-full slot available.
-  size_t prepare_insert(size_t hash) ABSL_ATTRIBUTE_NOINLINE {
+  iterator prepare_insert(size_t hash, size_t h2) ABSL_ATTRIBUTE_NOINLINE {
     // TODO: Should_rehash_for_bug_detection_on_insert() code should just be
     // removed, and we should simply set up growth_left() to be a smaller value
     // when we are doing this kind of fuzzing?
@@ -2710,20 +2730,20 @@ class raw_hash_set {
   // returned by find_or_prepare_insert(k) was true.
   // POSTCONDITION: *m.iterator_at(i) == value_type(forward<Args>(args)...).
   template <class... Args>
-  void emplace_at(size_t i, Args&&... args) {
-    PolicyTraits::construct(&alloc_ref(), slot_array() + i,
+  void emplace_at(iterator it, Args&&... args) {
+    PolicyTraits::construct(&alloc_ref(), it.get_slot(),
                             std::forward<Args>(args)...);
 
-    assert(PolicyTraits::apply(FindElement{*this}, *iterator_at(i)) ==
-               iterator_at(i) &&
+    assert(PolicyTraits::apply(FindElement{*this}, *it) ==
+              it &&
            "constructed value does not match the lookup key");
   }
 
-  iterator iterator_at(size_t i) ABSL_ATTRIBUTE_LIFETIME_BOUND {
-    return {control() + i, slot_array() + i, common().generation_ptr()};
+  iterator iterator_at(BinPointer bp, size_t slot_in_bin) ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    return {bp, slot_in_bin, common().generation_ptr()};
   }
-  const_iterator iterator_at(size_t i) const ABSL_ATTRIBUTE_LIFETIME_BOUND {
-    return {control() + i, slot_array() + i, common().generation_ptr()};
+  const_iterator iterator_at(BinPointer bp, size_t slot_in_bin) const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    return {bp, slot_in_bin, common().generation_ptr()};
   }
 
  private:

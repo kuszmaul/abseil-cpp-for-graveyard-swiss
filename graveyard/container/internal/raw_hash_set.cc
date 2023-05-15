@@ -82,7 +82,7 @@ bool CommonFieldsGenerationInfoEnabled::
   // `min(1, RehashProbabilityConstant() / capacity())`. In order to do this,
   // we probe based on a random hash and see if the offset is less than
   // RehashProbabilityConstant().
-  return probe(ctrl, capacity, absl::HashOf(RandomSeed())).offset() <
+  return H1(absl::HashOf(RandomSeed()), capacity) <
          RehashProbabilityConstant();
 }
 

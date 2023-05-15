@@ -2533,6 +2533,7 @@ class raw_hash_set {
     while (true) {
       Group g{ctrl + seq.offset()};
       for (uint32_t i : g.Match(H2(hash))) {
+        // TODO: This looks like a bug:  Calling == instead of
         if (ABSL_PREDICT_TRUE(
                 PolicyTraits::element(slot_array() + seq.offset(i)) == elem))
           return true;
