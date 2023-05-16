@@ -397,8 +397,6 @@ template <class Policy>
 class HashTableMemory {
   using slot_type = typename Policy::slot_type;
 
-  static constexpr size_t kCacheLineSize = Policy::cache_line_size;
-
   static constexpr size_t kSlotsPerBin = Policy::kSlotsPerBin;
 
   static constexpr size_t kCtrlSize = sizeof(ctrl_t);
@@ -457,6 +455,7 @@ class HashTableMemory {
     physical_bin_count_ = physical_bin_count;
     assert(memory_ == nullptr);
     // TODO: Use Allocate
+    constexpr size_t kCacheLineSize = ABSL_CACHELINE_SIZE;
     memory_ = static_cast<char*>(std::aligned_alloc(physical_bin_count > 4 ? std::max(kCacheLineSize, kAlignment) : kAlignment,
                                                     SizeOf()));
   }
@@ -1637,7 +1636,7 @@ class raw_hash_set {
       return PolicyTraits::element(bin_.get_slot(slot_in_bin_));
     }
     slot_type* get_slot() {
-      bin_.get_slot(slot_in_bin_);
+      return bin_.get_slot(slot_in_bin_);
     }
 
 #if 0
@@ -2592,7 +2591,7 @@ class raw_hash_set {
     Memory old_memory = std::move(hashtable_memory_);
     // TODO: This isn't right:   This formula is for
     hashtable_memory_.AllocateMemory(BinCountForLoad<Policy::kSlotsPerBin, Policy::kFullUtilizationNumerator, Policy::kFullUtilizationDenominator>(new_size));
-    common().capacity_ = hashtable_memory_.GetLogicalBinCount * Policy::kSlotsPerBin;
+    common().capacity_ = hashtable_memory_.GetLogicalBinCount() * Policy::kSlotsPerBin;
     initialize_slots();
     for (BinPointer bin_pointer = old_memory.MakeBinPointer(0); true; ++bin_pointer) {
       ctrl_t* ctrl = bin_pointer.get_control();
@@ -2661,7 +2660,7 @@ class raw_hash_set {
 
  private:
   static constexpr size_t SizeAfterRehash(size_t size) {
-    return Ceil(size * PolicyTraits::kRehashedUtilizationNumerator, PolicyTraits::kRehashedUtilizationDenominator);
+    return Ceil(size * Policy::kRehashedUtilizationNumerator, Policy::kRehashedUtilizationDenominator);
   }
 
  protected:
@@ -2707,18 +2706,18 @@ class raw_hash_set {
       // Move to a different heap allocation in order to detect bugs.
       resize(growth_left() > 0 ? capacity() : SizeAfterRehash(common().size_));
     }
-    auto target = find_first_non_full(common(), hash);
+    auto target = hashtable_memory_.find_first_empty(hash);
     if (!rehash_for_bug_detection &&
         ABSL_PREDICT_FALSE(growth_left() == 0)) {
       resize(SizeAfterRehash(common().size_));
-      target = find_first_non_full(common(), hash);
+      target = hashtable_memory_.find_first_empty(hash);
     }
     ++common().size_;
-    growth_left() -= IsEmpty(hashtable_memory_.ControlOf(target.bin_number)[target.slot_in_bin]);
-    hashtable_memory_.ControlOf(target.bin_number)[target.slot_in_bin].MakeDisordered(H2(hash));
+    growth_left() -= target.bin_pointer.get_control()[target.slot_in_bin].IsEmpty();
+    target.bin_pointer.get_control()[target.slot_in_bin].MakeDisordered(H2(hash));
     common().maybe_increment_generation_on_insert();
     infoz().RecordInsert(hash, target.probe_length);
-    return target.offset;
+    return iterator{target.bin_pointer, target.slot_in_bin, common().generation_ptr()};
   }
 
   // Constructs the value in the space pointed by the iterator. This only works
