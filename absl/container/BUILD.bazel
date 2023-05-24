@@ -269,6 +269,7 @@ cc_library(
     deps = [
         ":container_memory",
         ":hash_function_defaults",
+	":quadratic_probing",
         ":raw_hash_set",
         "//absl/algorithm:container",
         "//absl/base:core_headers",
@@ -604,6 +605,16 @@ cc_library(
     deps = [
         "//absl/meta:type_traits",
         "//absl/types:optional",
+    ],
+)
+
+cc_library(
+    name = "quadratic_probing",
+    hdrs = ["internal/quadratic_probing.h"],
+    copts = ABSL_DEFAULT_COPTS,
+    linkopts = ABSL_DEFAULT_LINKOPTS,
+    deps = [
+        "//absl/base:config",
     ],
 )
 
