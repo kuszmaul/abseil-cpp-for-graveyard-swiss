@@ -22,6 +22,7 @@
 
 #include "absl/base/internal/raw_logging.h"
 #include "absl/container/internal/hash_function_defaults.h"
+#include "absl/container/internal/quadratic_probing.h"
 #include "absl/container/internal/raw_hash_set.h"
 #include "absl/strings/str_format.h"
 #include "benchmark/benchmark.h"
@@ -124,14 +125,16 @@ struct StringEq : std::equal_to<absl::string_view> {
 };
 
 struct StringTable
-    : raw_hash_set<StringPolicy, StringHash, StringEq, std::allocator<int>> {
+    : raw_hash_set<StringPolicy, QuadraticProbing<StringPolicy::slot_type, std::allocator<int>>, StringHash, StringEq, std::allocator<int>> {
   using Base = typename StringTable::raw_hash_set;
   StringTable() {}
   using Base::Base;
 };
 
 struct IntTable
-    : raw_hash_set<IntPolicy, container_internal::hash_default_hash<int64_t>,
+    : raw_hash_set<IntPolicy,
+                   QuadraticProbing<IntPolicy::slot_type, std::allocator<int64_t>>,
+                   container_internal::hash_default_hash<int64_t>,
                    std::equal_to<int64_t>, std::allocator<int64_t>> {
   using Base = typename IntTable::raw_hash_set;
   IntTable() {}

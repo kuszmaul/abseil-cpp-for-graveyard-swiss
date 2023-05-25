@@ -105,8 +105,9 @@ template <class T, class Hash = absl::container_internal::hash_default_hash<T>,
           class Allocator = std::allocator<T>>
 class flat_hash_set
     : public absl::container_internal::raw_hash_set<
-  absl::container_internal::FlatHashSetPolicy<T>, absl::container_internal::QuadraticProbing<>
-Hash, Eq, Allocator> {
+  absl::container_internal::FlatHashSetPolicy<T>,
+  absl::container_internal::QuadraticProbing<typename absl::container_internal::FlatHashSetPolicy<T>::slot_type, Allocator>,
+  Hash, Eq, Allocator> {
   using Base = typename flat_hash_set::raw_hash_set;
 
  public:

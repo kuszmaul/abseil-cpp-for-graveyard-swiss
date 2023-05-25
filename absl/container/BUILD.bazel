@@ -235,6 +235,7 @@ cc_library(
     deps = [
         ":container_memory",
         ":hash_function_defaults",
+	":quadratic_probing",
         ":raw_hash_map",
         "//absl/algorithm:container",
         "//absl/base:core_headers",
@@ -306,6 +307,7 @@ cc_library(
         ":container_memory",
         ":hash_function_defaults",
         ":node_slot_policy",
+	":quadratic_probing",
         ":raw_hash_map",
         "//absl/algorithm:container",
         "//absl/base:core_headers",
@@ -339,6 +341,7 @@ cc_library(
     deps = [
         ":hash_function_defaults",
         ":node_slot_policy",
+	":quadratic_probing",
         ":raw_hash_set",
         "//absl/algorithm:container",
         "//absl/base:core_headers",
@@ -684,6 +687,7 @@ cc_binary(
     visibility = ["//visibility:private"],
     deps = [
         ":hash_function_defaults",
+	":quadratic_probing",
         ":raw_hash_set",
         "//absl/base:raw_logging_internal",
         "//absl/strings:str_format",
@@ -720,6 +724,7 @@ cc_test(
     copts = ABSL_TEST_COPTS,
     linkopts = ABSL_DEFAULT_LINKOPTS,
     deps = [
+        ":quadratic_probing",
         ":raw_hash_set",
         ":tracked",
         "//absl/base:core_headers",

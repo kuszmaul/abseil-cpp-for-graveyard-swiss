@@ -4,6 +4,8 @@
 #ifndef ABSL_CONTAINER_INTERNAL_QUADRATIC_PROBING_H_
 #define ABSL_CONTAINER_INTERNAL_QUADRATIC_PROBING_H_
 
+#include "absl/base/config.h"
+
 namespace absl {
 ABSL_NAMESPACE_BEGIN
 namespace container_internal {

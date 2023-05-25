@@ -398,21 +398,27 @@ struct StringEq : std::equal_to<absl::string_view> {
 };
 
 struct StringTable
-    : raw_hash_set<StringPolicy, StringHash, StringEq, std::allocator<int>> {
+    : raw_hash_set<StringPolicy,
+                   QuadraticProbing<StringPolicy::slot_type, std::allocator<int>>,
+                   StringHash, StringEq, std::allocator<int>> {
   using Base = typename StringTable::raw_hash_set;
   StringTable() = default;
   using Base::Base;
 };
 
 struct IntTable
-    : raw_hash_set<IntPolicy, container_internal::hash_default_hash<int64_t>,
+    : raw_hash_set<IntPolicy,
+                   QuadraticProbing<IntPolicy::slot_type, std::allocator<int64_t>>,
+                   container_internal::hash_default_hash<int64_t>,
                    std::equal_to<int64_t>, std::allocator<int64_t>> {
   using Base = typename IntTable::raw_hash_set;
   using Base::Base;
 };
 
 struct Uint8Table
-    : raw_hash_set<Uint8Policy, container_internal::hash_default_hash<uint8_t>,
+    : raw_hash_set<Uint8Policy,
+                   QuadraticProbing<Uint8Policy::slot_type, std::allocator<int8_t>>,
+                   container_internal::hash_default_hash<uint8_t>,
                    std::equal_to<uint8_t>, std::allocator<uint8_t>> {
   using Base = typename Uint8Table::raw_hash_set;
   using Base::Base;
@@ -431,7 +437,9 @@ struct CustomAlloc : std::allocator<T> {
 };
 
 struct CustomAllocIntTable
-    : raw_hash_set<IntPolicy, container_internal::hash_default_hash<int64_t>,
+    : raw_hash_set<IntPolicy,
+                   QuadraticProbing<IntPolicy::slot_type, std::allocator<int64_t>>,
+                   container_internal::hash_default_hash<int64_t>,
                    std::equal_to<int64_t>, CustomAlloc<int64_t>> {
   using Base = typename CustomAllocIntTable::raw_hash_set;
   using Base::Base;
@@ -444,7 +452,9 @@ struct BadFastHash {
   }
 };
 
-struct BadTable : raw_hash_set<IntPolicy, BadFastHash, std::equal_to<int>,
+struct BadTable : raw_hash_set<IntPolicy,
+                               QuadraticProbing<IntPolicy::slot_type, std::allocator<int>>,
+                               BadFastHash, std::equal_to<int>,
                                std::allocator<int>> {
   using Base = typename BadTable::raw_hash_set;
   BadTable() = default;
@@ -500,13 +510,17 @@ TEST(Table, EmptyFunctorOptimization) {
   EXPECT_EQ(
       mock_size + generation_size,
       sizeof(
-          raw_hash_set<StringPolicy, StatelessHash,
+          raw_hash_set<StringPolicy,
+                       QuadraticProbing<StringPolicy::slot_type, std::allocator<int>>,
+                       StatelessHash,
                        std::equal_to<absl::string_view>, std::allocator<int>>));
 
   EXPECT_EQ(
       mock_size + sizeof(StatefulHash) + generation_size,
       sizeof(
-          raw_hash_set<StringPolicy, StatefulHash,
+          raw_hash_set<StringPolicy,
+                       QuadraticProbing<StringPolicy::slot_type, std::allocator<int>>,
+                       StatefulHash,
                        std::equal_to<absl::string_view>, std::allocator<int>>));
 }
 
@@ -751,7 +765,9 @@ void TestDecompose(bool construct_three) {
   std::iota(elem_vector.begin(), elem_vector.end(), 0);
 
   using DecomposeSet =
-      raw_hash_set<DecomposePolicy, Hash, Eq, std::allocator<int>>;
+      raw_hash_set<DecomposePolicy,
+                   QuadraticProbing<DecomposePolicy::slot_type, std::allocator<int>>,
+                   Hash, Eq, std::allocator<int>>;
   DecomposeSet set1;
 
   decompose_constructed = 0;
@@ -902,7 +918,9 @@ struct Modulo1000Hash {
 };
 
 struct Modulo1000HashTable
-    : public raw_hash_set<IntPolicy, Modulo1000Hash, std::equal_to<int>,
+    : public raw_hash_set<IntPolicy,
+                          QuadraticProbing<IntPolicy::slot_type, std::allocator<int>>,
+                          Modulo1000Hash, std::equal_to<int>,
                           std::allocator<int>> {};
 
 // Test that rehash with no resize happen in case of many deleted slots.
@@ -1563,7 +1581,9 @@ TEST(Table, CopyConstructWithAlloc) {
 }
 
 struct ExplicitAllocIntTable
-    : raw_hash_set<IntPolicy, container_internal::hash_default_hash<int64_t>,
+    : raw_hash_set<IntPolicy,
+                   QuadraticProbing<IntPolicy::slot_type, std::allocator<int64_t>>,
+                   container_internal::hash_default_hash<int64_t>,
                    std::equal_to<int64_t>, Alloc<int64_t>> {
   ExplicitAllocIntTable() = default;
 };
@@ -1778,11 +1798,15 @@ TEST(Table, HeterogeneousLookup) {
     bool operator()(double a, double b) const { return a == b; }
   };
 
-  raw_hash_set<IntPolicy, Hash, Eq, Alloc<int64_t>> s{0, 1, 2};
+  raw_hash_set<IntPolicy,
+               QuadraticProbing<IntPolicy::slot_type, std::allocator<int64_t>>,
+               Hash, Eq, Alloc<int64_t>> s{0, 1, 2};
   // It will convert to int64_t before the query.
   EXPECT_EQ(1, *s.find(double{1.1}));
 
-  raw_hash_set<IntPolicy, THash, TEq, Alloc<int64_t>> ts{0, 1, 2};
+  raw_hash_set<IntPolicy,
+               QuadraticProbing<IntPolicy::slot_type, std::allocator<int64_t>>,
+               THash, TEq, Alloc<int64_t>> ts{0, 1, 2};
   // It will try to use the double, and fail to find the object.
   EXPECT_TRUE(ts.find(1.1) == ts.end());
 }
@@ -1810,7 +1834,9 @@ struct VerifyResultOf<C, Table, absl::void_t<C<Table>>> : std::true_type {};
 
 TEST(Table, HeterogeneousLookupOverloads) {
   using NonTransparentTable =
-      raw_hash_set<StringPolicy, absl::Hash<absl::string_view>,
+      raw_hash_set<StringPolicy,
+                   QuadraticProbing<StringPolicy::slot_type, std::allocator<int>>,
+                   absl::Hash<absl::string_view>,
                    std::equal_to<absl::string_view>, std::allocator<int>>;
 
   EXPECT_FALSE((VerifyResultOf<CallFind, NonTransparentTable>()));
@@ -1821,6 +1847,7 @@ TEST(Table, HeterogeneousLookupOverloads) {
 
   using TransparentTable = raw_hash_set<
       StringPolicy,
+      QuadraticProbing<StringPolicy::slot_type, std::allocator<int>>,
       absl::container_internal::hash_default_hash<absl::string_view>,
       absl::container_internal::hash_default_eq<absl::string_view>,
       std::allocator<int>>;
@@ -1882,7 +1909,9 @@ TEST(Table, IteratorEmplaceConstructibleRequirement) {
     }
   };
 
-  struct Table : raw_hash_set<ValuePolicy<Value>, H, std::equal_to<Value>,
+  struct Table : raw_hash_set<ValuePolicy<Value>,
+                              QuadraticProbing<ValuePolicy<Value>::slot_type, std::allocator<Value>>,
+                              H, std::equal_to<Value>,
                               std::allocator<Value>> {
     using Base = typename Table::raw_hash_set;
     using Base::Base;

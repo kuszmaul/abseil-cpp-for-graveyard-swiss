@@ -22,6 +22,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/internal/hash_function_defaults.h"
 #include "absl/container/internal/hashtable_debug.h"
+#include "absl/container/internal/quadratic_probing.h"
 #include "absl/container/internal/raw_hash_set.h"
 #include "absl/random/distributions.h"
 #include "absl/random/random.h"
@@ -127,7 +128,9 @@ using DefaultHashT = typename DefaultHash<T>::type;
 
 template <class T>
 struct Table : absl::container_internal::raw_hash_set<
-                   Policy<T>, DefaultHashT<T>,
+                   Policy<T>,
+                   absl::container_internal::QuadraticProbing<typename Policy<T>::slot_type, RandomizedAllocator<T>>,
+                   DefaultHashT<T>,
                    absl::container_internal::hash_default_eq<T>,
                    RandomizedAllocator<T>> {};
 

@@ -968,7 +968,7 @@ class CommonFields : public CommonFieldsGenerationInfo {
 // `Group::kWidth`-width probe window starting from any control byte.
 constexpr size_t NumClonedBytes() { return Group::kWidth - 1; }
 
-template <class Policy, class Hash, class Eq, class Alloc>
+template <class Policy, class PorbingPolicy, class Hash, class Eq, class Alloc>
 class raw_hash_set;
 
 // Returns whether `n` is a valid capacity (i.e., number of slots).
@@ -1430,7 +1430,7 @@ void DropDeletesWithoutResize(CommonFields& common,
 // [https://en.cppreference.com/w/cpp/named_req/Allocator] with which
 // the storage of the hashtable will be allocated and the elements will be
 // constructed and destroyed.
-template <class Policy, class Hash, class Eq, class Alloc>
+template <class Policy, class ProbingPolicy, class Hash, class Eq, class Alloc>
 class raw_hash_set {
   using PolicyTraits = hash_policy_traits<Policy>;
   using KeyArgImpl =
@@ -2129,7 +2129,7 @@ class raw_hash_set {
   // Moves elements from `src` into `this`.
   // If the element already exists in `this`, it is left unmodified in `src`.
   template <typename H, typename E>
-  void merge(raw_hash_set<Policy, H, E, Alloc>& src) {  // NOLINT
+  void merge(raw_hash_set<Policy, ProbingPolicy, H, E, Alloc>& src) {  // NOLINT
     assert(this != &src);
     for (auto it = src.begin(), e = src.end(); it != e;) {
       auto next = std::next(it);
@@ -2143,7 +2143,7 @@ class raw_hash_set {
   }
 
   template <typename H, typename E>
-  void merge(raw_hash_set<Policy, H, E, Alloc>&& src) {
+  void merge(raw_hash_set<Policy, ProbingPolicy, H, E, Alloc>&& src) {
     merge(src);
   }
 
@@ -2723,9 +2723,9 @@ class raw_hash_set {
 };
 
 // Erases all elements that satisfy the predicate `pred` from the container `c`.
-template <typename P, typename H, typename E, typename A, typename Predicate>
-typename raw_hash_set<P, H, E, A>::size_type EraseIf(
-    Predicate& pred, raw_hash_set<P, H, E, A>* c) {
+template <typename P, typename PP, typename H, typename E, typename A, typename Predicate>
+typename raw_hash_set<P, PP, H, E, A>::size_type EraseIf(
+    Predicate& pred, raw_hash_set<P, PP, H, E, A>* c) {
   const auto initial_size = c->size();
   for (auto it = c->begin(), last = c->end(); it != last;) {
     if (pred(*it)) {

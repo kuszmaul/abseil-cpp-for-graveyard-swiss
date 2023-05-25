@@ -16,6 +16,7 @@
 #include <scoped_allocator>
 
 #include "gtest/gtest.h"
+#include "absl/container/internal/quadratic_probing.h"
 #include "absl/container/internal/raw_hash_set.h"
 #include "absl/container/internal/tracked.h"
 
@@ -174,7 +175,8 @@ template <int Spec>
 struct PropagateTest : public ::testing::Test {
   using Alloc = CheckedAlloc<Tracked<int32_t>, Spec>;
 
-  using Table = raw_hash_set<Policy, Identity, std::equal_to<int32_t>, Alloc>;
+  using Table = raw_hash_set<Policy, QuadraticProbing<Policy::slot_type, Alloc>,
+                             Identity, std::equal_to<int32_t>, Alloc>;
 
   PropagateTest() {
     EXPECT_EQ(a1, t1.get_allocator());
@@ -471,7 +473,9 @@ class PAlloc {
     __GNUC_MINOR__ != 5)
 TEST(NoPropagateOn, Swap) {
   using PA = PAlloc<char>;
-  using Table = raw_hash_set<Policy, Identity, std::equal_to<int32_t>, PA>;
+  using Table = raw_hash_set<Policy,
+                             QuadraticProbing<Policy::slot_type, PA>,
+                             Identity, std::equal_to<int32_t>, PA>;
 
   Table t1(PA{1}), t2(PA{2});
   swap(t1, t2);
@@ -482,7 +486,9 @@ TEST(NoPropagateOn, Swap) {
 
 TEST(NoPropagateOn, CopyConstruct) {
   using PA = PAlloc<char>;
-  using Table = raw_hash_set<Policy, Identity, std::equal_to<int32_t>, PA>;
+  using Table = raw_hash_set<Policy,
+                             QuadraticProbing<Policy::slot_type, PA>,
+                             Identity, std::equal_to<int32_t>, PA>;
 
   Table t1(PA{1}), t2(t1);
   EXPECT_EQ(t1.get_allocator(), PA(1));
@@ -491,7 +497,9 @@ TEST(NoPropagateOn, CopyConstruct) {
 
 TEST(NoPropagateOn, Assignment) {
   using PA = PAlloc<char>;
-  using Table = raw_hash_set<Policy, Identity, std::equal_to<int32_t>, PA>;
+  using Table = raw_hash_set<Policy,
+                             QuadraticProbing<Policy::slot_type, PA>,
+                             Identity, std::equal_to<int32_t>, PA>;
 
   Table t1(PA{1}), t2(PA{2});
   t1 = t2;

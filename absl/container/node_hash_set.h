@@ -41,6 +41,7 @@
 #include "absl/base/macros.h"
 #include "absl/container/internal/hash_function_defaults.h"  // IWYU pragma: export
 #include "absl/container/internal/node_slot_policy.h"
+#include "absl/container/internal/quadratic_probing.h"
 #include "absl/container/internal/raw_hash_set.h"  // IWYU pragma: export
 #include "absl/memory/memory.h"
 
@@ -99,7 +100,9 @@ template <class T, class Hash = absl::container_internal::hash_default_hash<T>,
           class Alloc = std::allocator<T>>
 class node_hash_set
     : public absl::container_internal::raw_hash_set<
-          absl::container_internal::NodeHashSetPolicy<T>, Hash, Eq, Alloc> {
+               absl::container_internal::NodeHashSetPolicy<T>,
+               absl::container_internal::QuadraticProbing<typename absl::container_internal::NodeHashSetPolicy<T>::slot_type, Alloc>,
+               Hash, Eq, Alloc> {
   using Base = typename node_hash_set::raw_hash_set;
 
  public:

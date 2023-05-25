@@ -27,8 +27,8 @@ namespace absl {
 ABSL_NAMESPACE_BEGIN
 namespace container_internal {
 
-template <class Policy, class Hash, class Eq, class Alloc>
-class raw_hash_map : public raw_hash_set<Policy, Hash, Eq, Alloc> {
+template <class Policy, class ProbingPolicy, class Hash, class Eq, class Alloc>
+class raw_hash_map : public raw_hash_set<Policy, ProbingPolicy, Hash, Eq, Alloc> {
   // P is Policy. It's passed as a template argument to support maps that have
   // incomplete types as values, as in unordered_map<K, IncompleteType>.
   // MappedReference<> may be a non-reference type.
