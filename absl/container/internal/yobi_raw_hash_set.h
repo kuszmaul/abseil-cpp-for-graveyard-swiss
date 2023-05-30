@@ -217,8 +217,33 @@
 #include <arm_neon.h>
 #endif
 
-namespace absl {
+namespace yobi {
 ABSL_NAMESPACE_BEGIN
+
+using absl::countl_zero;
+using absl::countr_zero;
+using absl::bit_width;
+namespace little_endian {
+using absl::little_endian::Load64;
+using absl::little_endian::Store64;
+}
+namespace container_internal {
+using absl::container_internal::Allocate;
+using absl::container_internal::CommonAccess;
+using absl::container_internal::Deallocate;
+using absl::container_internal::IsTransparent;
+using absl::container_internal::KeyArg;
+using absl::container_internal::Sample;
+using absl::container_internal::hash_policy_traits;
+using absl::container_internal::HashtablezInfoHandle;
+using absl::container_internal::InsertReturnType;
+using absl::container_internal::node_handle;
+using absl::container_internal::SanitizerPoisonMemoryRegion;
+using absl::container_internal::SanitizerUnpoisonMemoryRegion;
+//using absl::container_internal::hashtable_debug_internal::
+//      HashtableDebugAccess;
+}
+
 namespace container_internal {
 
 #ifdef ABSL_SWISSTABLE_ENABLE_GENERATIONS
@@ -2737,7 +2762,6 @@ typename raw_hash_set<P, H, E, A>::size_type EraseIf(
   return initial_size - c->size();
 }
 
-#if 0
 namespace hashtable_debug_internal {
 template <typename Set>
 struct HashtableDebugAccess<Set, absl::void_t<typename Set::raw_hash_set>> {
@@ -2799,10 +2823,9 @@ struct HashtableDebugAccess<Set, absl::void_t<typename Set::raw_hash_set>> {
 };
 
 }  // namespace hashtable_debug_internal
-#endif
 }  // namespace container_internal
 ABSL_NAMESPACE_END
-}  // namespace absl
+}  // namespace yobi
 
 #undef ABSL_SWISSTABLE_ENABLE_GENERATIONS
 
