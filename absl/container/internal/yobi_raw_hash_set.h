@@ -2768,7 +2768,7 @@ ABSL_NAMESPACE_END
 
 namespace absl::container_internal::hashtable_debug_internal {
 template <typename Set>
-struct HashtableDebugAccess<Set, absl::void_t<typename Set::yobi_yobi_raw_hash_set>> {
+struct HashtableDebugAccess<Set, absl::void_t<typename Set::yobi_raw_hash_set>> {
   using ctrl_t = yobi::container_internal::ctrl_t;
   using Group = yobi::container_internal::Group;
   using Traits = typename Set::PolicyTraits;
