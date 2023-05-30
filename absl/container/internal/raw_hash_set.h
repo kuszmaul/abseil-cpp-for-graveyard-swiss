@@ -2737,7 +2737,6 @@ typename raw_hash_set<P, H, E, A>::size_type EraseIf(
   return initial_size - c->size();
 }
 
-#if 0
 namespace hashtable_debug_internal {
 template <typename Set>
 struct HashtableDebugAccess<Set, absl::void_t<typename Set::raw_hash_set>> {
@@ -2799,7 +2798,6 @@ struct HashtableDebugAccess<Set, absl::void_t<typename Set::raw_hash_set>> {
 };
 
 }  // namespace hashtable_debug_internal
-#endif
 }  // namespace container_internal
 ABSL_NAMESPACE_END
 }  // namespace absl

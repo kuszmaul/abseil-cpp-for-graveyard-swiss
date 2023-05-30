@@ -635,7 +635,7 @@ cc_library(
 )
 
 cc_library(
-    name = "ryboi_aw_hash_set",
+    name = "yobi_raw_hash_set",
     srcs = ["internal/yobi_raw_hash_set.cc"],
     hdrs = ["internal/yobi_raw_hash_set.h"],
     copts = ABSL_DEFAULT_COPTS,
