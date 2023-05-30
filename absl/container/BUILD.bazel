@@ -635,9 +635,9 @@ cc_library(
 )
 
 cc_library(
-    name = "yobi_raw_hash_set",
-    srcs = ["internal/yobi_raw_hash_set.cc"],
-    hdrs = ["internal/yobi_raw_hash_set.h"],
+    name = "graveyard_raw_hash_set",
+    srcs = ["internal/graveyard_raw_hash_set.cc"],
+    hdrs = ["internal/graveyard_raw_hash_set.h"],
     copts = ABSL_DEFAULT_COPTS,
     linkopts = ABSL_DEFAULT_LINKOPTS,
     deps = [
@@ -691,8 +691,8 @@ cc_test(
 )
 
 cc_test(
-    name = "yobi_raw_hash_set_test",
-    srcs = ["internal/yobi_raw_hash_set_test.cc"],
+    name = "graveyard_raw_hash_set_test",
+    srcs = ["internal/graveyard_raw_hash_set_test.cc"],
     copts = ABSL_TEST_COPTS,
     linkstatic = 1,
     tags = NOTEST_TAGS_MOBILE + [
@@ -707,7 +707,7 @@ cc_test(
         ":hash_function_defaults",
         ":hash_policy_testing",
         ":hashtable_debug",
-        ":yobi_raw_hash_set",
+        ":graveyard_raw_hash_set",
         "//absl/base",
         "//absl/base:config",
         "//absl/base:core_headers",
@@ -773,13 +773,13 @@ cc_test(
 )
 
 cc_test(
-    name = "yobi_raw_hash_set_allocator_test",
+    name = "graveyard_raw_hash_set_allocator_test",
     size = "small",
-    srcs = ["internal/yobi_raw_hash_set_allocator_test.cc"],
+    srcs = ["internal/graveyard_raw_hash_set_allocator_test.cc"],
     copts = ABSL_TEST_COPTS,
     linkopts = ABSL_DEFAULT_LINKOPTS,
     deps = [
-        ":yobi_raw_hash_set",
+        ":graveyard_raw_hash_set",
         ":tracked",
         "//absl/base:core_headers",
         "@com_google_googletest//:gtest_main",

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "absl/container/internal/yobi_raw_hash_set.h"
+#include "absl/container/internal/graveyard_raw_hash_set.h"
 
 #include <atomic>
 #include <cstddef>
