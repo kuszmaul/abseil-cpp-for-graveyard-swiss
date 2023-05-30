@@ -690,6 +690,35 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "yobi_raw_hash_set_test",
+    srcs = ["internal/yobi_raw_hash_set_test.cc"],
+    copts = ABSL_TEST_COPTS,
+    linkstatic = 1,
+    tags = NOTEST_TAGS_MOBILE + [
+        "no_test_loonix",
+        # TODO(b/237097643): investigate race and remove
+        "noarm_gemu",
+    ],
+    deps = [
+        ":container_memory",
+        ":flat_hash_map",
+        ":flat_hash_set",
+        ":hash_function_defaults",
+        ":hash_policy_testing",
+        ":hashtable_debug",
+        ":yobi_raw_hash_set",
+        "//absl/base",
+        "//absl/base:config",
+        "//absl/base:core_headers",
+        "//absl/base:prefetch",
+        "//absl/base:raw_logging_internal",
+        "//absl/log",
+        "//absl/strings",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_binary(
     name = "raw_hash_set_benchmark",
     testonly = 1,
