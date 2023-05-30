@@ -169,8 +169,8 @@
 // To iterate, we simply traverse the array, skipping empty and deleted slots
 // and stopping when we hit a `kSentinel`.
 
-#ifndef ABSL_CONTAINER_INTERNAL_RAW_HASH_SET_H_
-#define ABSL_CONTAINER_INTERNAL_RAW_HASH_SET_H_
+#ifndef ABSL_CONTAINER_INTERNAL_YOBI_RAW_HASH_SET_H_
+#define ABSL_CONTAINER_INTERNAL_YOBI_RAW_HASH_SET_H_
 
 #include <algorithm>
 #include <cmath>
@@ -852,7 +852,7 @@ class CommonFieldsGenerationInfoEnabled {
   // remain valid when the container is moved.
   // Note: we could derive this pointer from the control pointer, but it makes
   // the code more complicated, and there's a benefit in having the sizes of
-  // raw_hash_set in sanitizer mode and non-sanitizer mode a bit more different,
+  // yobi_raw_hash_set in sanitizer mode and non-sanitizer mode a bit more different,
   // which is that tests are less likely to rely on the size remaining the same.
   GenerationType* generation_ = EmptyGeneration();
 };
@@ -914,7 +914,7 @@ using CommonFieldsGenerationInfo = CommonFieldsGenerationInfoDisabled;
 using HashSetIteratorGenerationInfo = HashSetIteratorGenerationInfoDisabled;
 #endif
 
-// CommonFields hold the fields in raw_hash_set that do not depend
+// CommonFields hold the fields in yobi_raw_hash_set that do not depend
 // on template parameters. This allows us to conveniently pass all
 // of this state to helper functions as a single argument.
 class CommonFields : public CommonFieldsGenerationInfo {
@@ -994,7 +994,7 @@ class CommonFields : public CommonFieldsGenerationInfo {
 constexpr size_t NumClonedBytes() { return Group::kWidth - 1; }
 
 template <class Policy, class Hash, class Eq, class Alloc>
-class raw_hash_set;
+class yobi_raw_hash_set;
 
 // Returns whether `n` is a valid capacity (i.e., number of slots).
 //
@@ -1380,7 +1380,7 @@ ABSL_ATTRIBUTE_NOINLINE void InitializeSlots(CommonFields& c, Alloc alloc) {
 }
 
 // PolicyFunctions bundles together some information for a particular
-// raw_hash_set<T, ...> instantiation. This information is passed to
+// yobi_raw_hash_set<T, ...> instantiation. This information is passed to
 // type-erased functions that want to do small amounts of type-specific
 // work.
 struct PolicyFunctions {
@@ -1403,12 +1403,12 @@ struct PolicyFunctions {
 void ClearBackingArray(CommonFields& c, const PolicyFunctions& policy,
                        bool reuse);
 
-// Type-erased version of raw_hash_set::erase_meta_only.
+// Type-erased version of yobi_raw_hash_set::erase_meta_only.
 void EraseMetaOnly(CommonFields& c, ctrl_t* it, size_t slot_size);
 
-// Function to place in PolicyFunctions::dealloc for raw_hash_sets
+// Function to place in PolicyFunctions::dealloc for yobi_raw_hash_sets
 // that are using std::allocator. This allows us to share the same
-// function body for raw_hash_set instantiations that have the
+// function body for yobi_raw_hash_set instantiations that have the
 // same slot alignment.
 template <size_t AlignOfSlot>
 ABSL_ATTRIBUTE_NOINLINE void DeallocateStandard(void*,
@@ -1424,14 +1424,14 @@ ABSL_ATTRIBUTE_NOINLINE void DeallocateStandard(void*,
 }
 
 // For trivially relocatable types we use memcpy directly. This allows us to
-// share the same function body for raw_hash_set instantiations that have the
+// share the same function body for yobi_raw_hash_set instantiations that have the
 // same slot size as long as they are relocatable.
 template <size_t SizeOfSlot>
 ABSL_ATTRIBUTE_NOINLINE void TransferRelocatable(void*, void* dst, void* src) {
   memcpy(dst, src, SizeOfSlot);
 }
 
-// Type-erased version of raw_hash_set::drop_deletes_without_resize.
+// Type-erased version of yobi_raw_hash_set::drop_deletes_without_resize.
 void DropDeletesWithoutResize(CommonFields& common,
                               const PolicyFunctions& policy, void* tmp_space);
 
@@ -1456,7 +1456,7 @@ void DropDeletesWithoutResize(CommonFields& common,
 // the storage of the hashtable will be allocated and the elements will be
 // constructed and destroyed.
 template <class Policy, class Hash, class Eq, class Alloc>
-class raw_hash_set {
+class yobi_raw_hash_set {
   using PolicyTraits = hash_policy_traits<Policy>;
   using KeyArgImpl =
       KeyArg<IsTransparent<Eq>::value && IsTransparent<Hash>::value>;
@@ -1536,16 +1536,16 @@ class raw_hash_set {
                 "Allocators with custom pointer types are not supported");
 
   class iterator : private HashSetIteratorGenerationInfo {
-    friend class raw_hash_set;
+    friend class yobi_raw_hash_set;
 
    public:
     using iterator_category = std::forward_iterator_tag;
-    using value_type = typename raw_hash_set::value_type;
+    using value_type = typename yobi_raw_hash_set::value_type;
     using reference =
         absl::conditional_t<PolicyTraits::constant_iterators::value,
                             const value_type&, value_type&>;
     using pointer = absl::remove_reference_t<reference>*;
-    using difference_type = typename raw_hash_set::difference_type;
+    using difference_type = typename yobi_raw_hash_set::difference_type;
 
     iterator() {}
 
@@ -1625,14 +1625,14 @@ class raw_hash_set {
   };
 
   class const_iterator {
-    friend class raw_hash_set;
+    friend class yobi_raw_hash_set;
 
    public:
     using iterator_category = typename iterator::iterator_category;
-    using value_type = typename raw_hash_set::value_type;
-    using reference = typename raw_hash_set::const_reference;
-    using pointer = typename raw_hash_set::const_pointer;
-    using difference_type = typename raw_hash_set::difference_type;
+    using value_type = typename yobi_raw_hash_set::value_type;
+    using reference = typename yobi_raw_hash_set::const_reference;
+    using pointer = typename yobi_raw_hash_set::const_pointer;
+    using difference_type = typename yobi_raw_hash_set::difference_type;
 
     const_iterator() = default;
     // Implicit construction from iterator.
@@ -1668,12 +1668,12 @@ class raw_hash_set {
 
   // Note: can't use `= default` due to non-default noexcept (causes
   // problems for some compilers). NOLINTNEXTLINE
-  raw_hash_set() noexcept(
+  yobi_raw_hash_set() noexcept(
       std::is_nothrow_default_constructible<hasher>::value&&
           std::is_nothrow_default_constructible<key_equal>::value&&
               std::is_nothrow_default_constructible<allocator_type>::value) {}
 
-  ABSL_ATTRIBUTE_NOINLINE explicit raw_hash_set(
+  ABSL_ATTRIBUTE_NOINLINE explicit yobi_raw_hash_set(
       size_t bucket_count, const hasher& hash = hasher(),
       const key_equal& eq = key_equal(),
       const allocator_type& alloc = allocator_type())
@@ -1684,38 +1684,38 @@ class raw_hash_set {
     }
   }
 
-  raw_hash_set(size_t bucket_count, const hasher& hash,
+  yobi_raw_hash_set(size_t bucket_count, const hasher& hash,
                const allocator_type& alloc)
-      : raw_hash_set(bucket_count, hash, key_equal(), alloc) {}
+      : yobi_raw_hash_set(bucket_count, hash, key_equal(), alloc) {}
 
-  raw_hash_set(size_t bucket_count, const allocator_type& alloc)
-      : raw_hash_set(bucket_count, hasher(), key_equal(), alloc) {}
+  yobi_raw_hash_set(size_t bucket_count, const allocator_type& alloc)
+      : yobi_raw_hash_set(bucket_count, hasher(), key_equal(), alloc) {}
 
-  explicit raw_hash_set(const allocator_type& alloc)
-      : raw_hash_set(0, hasher(), key_equal(), alloc) {}
+  explicit yobi_raw_hash_set(const allocator_type& alloc)
+      : yobi_raw_hash_set(0, hasher(), key_equal(), alloc) {}
 
   template <class InputIter>
-  raw_hash_set(InputIter first, InputIter last, size_t bucket_count = 0,
+  yobi_raw_hash_set(InputIter first, InputIter last, size_t bucket_count = 0,
                const hasher& hash = hasher(), const key_equal& eq = key_equal(),
                const allocator_type& alloc = allocator_type())
-      : raw_hash_set(SelectBucketCountForIterRange(first, last, bucket_count),
+      : yobi_raw_hash_set(SelectBucketCountForIterRange(first, last, bucket_count),
                      hash, eq, alloc) {
     insert(first, last);
   }
 
   template <class InputIter>
-  raw_hash_set(InputIter first, InputIter last, size_t bucket_count,
+  yobi_raw_hash_set(InputIter first, InputIter last, size_t bucket_count,
                const hasher& hash, const allocator_type& alloc)
-      : raw_hash_set(first, last, bucket_count, hash, key_equal(), alloc) {}
+      : yobi_raw_hash_set(first, last, bucket_count, hash, key_equal(), alloc) {}
 
   template <class InputIter>
-  raw_hash_set(InputIter first, InputIter last, size_t bucket_count,
+  yobi_raw_hash_set(InputIter first, InputIter last, size_t bucket_count,
                const allocator_type& alloc)
-      : raw_hash_set(first, last, bucket_count, hasher(), key_equal(), alloc) {}
+      : yobi_raw_hash_set(first, last, bucket_count, hasher(), key_equal(), alloc) {}
 
   template <class InputIter>
-  raw_hash_set(InputIter first, InputIter last, const allocator_type& alloc)
-      : raw_hash_set(first, last, 0, hasher(), key_equal(), alloc) {}
+  yobi_raw_hash_set(InputIter first, InputIter last, const allocator_type& alloc)
+      : yobi_raw_hash_set(first, last, 0, hasher(), key_equal(), alloc) {}
 
   // Instead of accepting std::initializer_list<value_type> as the first
   // argument like std::unordered_set<value_type> does, we have two overloads
@@ -1739,48 +1739,48 @@ class raw_hash_set {
   //
   // RequiresNotInit<T> is a workaround for gcc prior to 7.1.
   template <class T, RequiresNotInit<T> = 0, RequiresInsertable<T> = 0>
-  raw_hash_set(std::initializer_list<T> init, size_t bucket_count = 0,
+  yobi_raw_hash_set(std::initializer_list<T> init, size_t bucket_count = 0,
                const hasher& hash = hasher(), const key_equal& eq = key_equal(),
                const allocator_type& alloc = allocator_type())
-      : raw_hash_set(init.begin(), init.end(), bucket_count, hash, eq, alloc) {}
+      : yobi_raw_hash_set(init.begin(), init.end(), bucket_count, hash, eq, alloc) {}
 
-  raw_hash_set(std::initializer_list<init_type> init, size_t bucket_count = 0,
+  yobi_raw_hash_set(std::initializer_list<init_type> init, size_t bucket_count = 0,
                const hasher& hash = hasher(), const key_equal& eq = key_equal(),
                const allocator_type& alloc = allocator_type())
-      : raw_hash_set(init.begin(), init.end(), bucket_count, hash, eq, alloc) {}
+      : yobi_raw_hash_set(init.begin(), init.end(), bucket_count, hash, eq, alloc) {}
 
   template <class T, RequiresNotInit<T> = 0, RequiresInsertable<T> = 0>
-  raw_hash_set(std::initializer_list<T> init, size_t bucket_count,
+  yobi_raw_hash_set(std::initializer_list<T> init, size_t bucket_count,
                const hasher& hash, const allocator_type& alloc)
-      : raw_hash_set(init, bucket_count, hash, key_equal(), alloc) {}
+      : yobi_raw_hash_set(init, bucket_count, hash, key_equal(), alloc) {}
 
-  raw_hash_set(std::initializer_list<init_type> init, size_t bucket_count,
+  yobi_raw_hash_set(std::initializer_list<init_type> init, size_t bucket_count,
                const hasher& hash, const allocator_type& alloc)
-      : raw_hash_set(init, bucket_count, hash, key_equal(), alloc) {}
+      : yobi_raw_hash_set(init, bucket_count, hash, key_equal(), alloc) {}
 
   template <class T, RequiresNotInit<T> = 0, RequiresInsertable<T> = 0>
-  raw_hash_set(std::initializer_list<T> init, size_t bucket_count,
+  yobi_raw_hash_set(std::initializer_list<T> init, size_t bucket_count,
                const allocator_type& alloc)
-      : raw_hash_set(init, bucket_count, hasher(), key_equal(), alloc) {}
+      : yobi_raw_hash_set(init, bucket_count, hasher(), key_equal(), alloc) {}
 
-  raw_hash_set(std::initializer_list<init_type> init, size_t bucket_count,
+  yobi_raw_hash_set(std::initializer_list<init_type> init, size_t bucket_count,
                const allocator_type& alloc)
-      : raw_hash_set(init, bucket_count, hasher(), key_equal(), alloc) {}
+      : yobi_raw_hash_set(init, bucket_count, hasher(), key_equal(), alloc) {}
 
   template <class T, RequiresNotInit<T> = 0, RequiresInsertable<T> = 0>
-  raw_hash_set(std::initializer_list<T> init, const allocator_type& alloc)
-      : raw_hash_set(init, 0, hasher(), key_equal(), alloc) {}
+  yobi_raw_hash_set(std::initializer_list<T> init, const allocator_type& alloc)
+      : yobi_raw_hash_set(init, 0, hasher(), key_equal(), alloc) {}
 
-  raw_hash_set(std::initializer_list<init_type> init,
+  yobi_raw_hash_set(std::initializer_list<init_type> init,
                const allocator_type& alloc)
-      : raw_hash_set(init, 0, hasher(), key_equal(), alloc) {}
+      : yobi_raw_hash_set(init, 0, hasher(), key_equal(), alloc) {}
 
-  raw_hash_set(const raw_hash_set& that)
-      : raw_hash_set(that, AllocTraits::select_on_container_copy_construction(
+  yobi_raw_hash_set(const yobi_raw_hash_set& that)
+      : yobi_raw_hash_set(that, AllocTraits::select_on_container_copy_construction(
                                that.alloc_ref())) {}
 
-  raw_hash_set(const raw_hash_set& that, const allocator_type& a)
-      : raw_hash_set(0, that.hash_ref(), that.eq_ref(), a) {
+  yobi_raw_hash_set(const yobi_raw_hash_set& that, const allocator_type& a)
+      : yobi_raw_hash_set(0, that.hash_ref(), that.eq_ref(), a) {
     reserve(that.size());
     // Because the table is guaranteed to be empty, we can do something faster
     // than a full `insert`.
@@ -1796,7 +1796,7 @@ class raw_hash_set {
     growth_left() -= that.size();
   }
 
-  ABSL_ATTRIBUTE_NOINLINE raw_hash_set(raw_hash_set&& that) noexcept(
+  ABSL_ATTRIBUTE_NOINLINE yobi_raw_hash_set(yobi_raw_hash_set&& that) noexcept(
       std::is_nothrow_copy_constructible<hasher>::value&&
           std::is_nothrow_copy_constructible<key_equal>::value&&
               std::is_nothrow_copy_constructible<allocator_type>::value)
@@ -1806,7 +1806,7 @@ class raw_hash_set {
         settings_(absl::exchange(that.common(), CommonFields{}),
                   that.hash_ref(), that.eq_ref(), that.alloc_ref()) {}
 
-  raw_hash_set(raw_hash_set&& that, const allocator_type& a)
+  yobi_raw_hash_set(yobi_raw_hash_set&& that, const allocator_type& a)
       : settings_(CommonFields{}, that.hash_ref(), that.eq_ref(), a) {
     if (a == that.alloc_ref()) {
       std::swap(common(), that.common());
@@ -1818,8 +1818,8 @@ class raw_hash_set {
     }
   }
 
-  raw_hash_set& operator=(const raw_hash_set& that) {
-    raw_hash_set tmp(that,
+  yobi_raw_hash_set& operator=(const yobi_raw_hash_set& that) {
+    yobi_raw_hash_set tmp(that,
                      AllocTraits::propagate_on_container_copy_assignment::value
                          ? that.alloc_ref()
                          : alloc_ref());
@@ -1827,7 +1827,7 @@ class raw_hash_set {
     return *this;
   }
 
-  raw_hash_set& operator=(raw_hash_set&& that) noexcept(
+  yobi_raw_hash_set& operator=(yobi_raw_hash_set&& that) noexcept(
       absl::allocator_traits<allocator_type>::is_always_equal::value&&
           std::is_nothrow_move_assignable<hasher>::value&&
               std::is_nothrow_move_assignable<key_equal>::value) {
@@ -1839,7 +1839,7 @@ class raw_hash_set {
         typename AllocTraits::propagate_on_container_move_assignment());
   }
 
-  ~raw_hash_set() {
+  ~yobi_raw_hash_set() {
     const size_t cap = capacity();
     if (!cap) return;
     destroy_slots();
@@ -1863,7 +1863,7 @@ class raw_hash_set {
   }
 
   const_iterator begin() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
-    return const_cast<raw_hash_set*>(this)->begin();
+    return const_cast<yobi_raw_hash_set*>(this)->begin();
   }
   const_iterator end() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
     return iterator(common().generation_ptr());
@@ -2049,13 +2049,13 @@ class raw_hash_set {
   // Extension API: support for lazy emplace.
   //
   // Looks up key in the table. If found, returns the iterator to the element.
-  // Otherwise calls `f` with one argument of type `raw_hash_set::constructor`.
+  // Otherwise calls `f` with one argument of type `yobi_raw_hash_set::constructor`.
   //
   // `f` must abide by several restrictions:
-  //  - it MUST call `raw_hash_set::constructor` with arguments as if a
-  //    `raw_hash_set::value_type` is constructed,
+  //  - it MUST call `yobi_raw_hash_set::constructor` with arguments as if a
+  //    `yobi_raw_hash_set::value_type` is constructed,
   //  - it MUST NOT access the container before the call to
-  //    `raw_hash_set::constructor`, and
+  //    `yobi_raw_hash_set::constructor`, and
   //  - it MUST NOT erase the lazily emplaced element.
   // Doing any of these is undefined behavior.
   //
@@ -2074,7 +2074,7 @@ class raw_hash_set {
   // WARNING: This API is currently experimental. If there is a way to implement
   // the same thing with the rest of the API, prefer that.
   class constructor {
-    friend class raw_hash_set;
+    friend class yobi_raw_hash_set;
 
    public:
     template <class... Args>
@@ -2154,7 +2154,7 @@ class raw_hash_set {
   // Moves elements from `src` into `this`.
   // If the element already exists in `this`, it is left unmodified in `src`.
   template <typename H, typename E>
-  void merge(raw_hash_set<Policy, H, E, Alloc>& src) {  // NOLINT
+  void merge(yobi_raw_hash_set<Policy, H, E, Alloc>& src) {  // NOLINT
     assert(this != &src);
     for (auto it = src.begin(), e = src.end(); it != e;) {
       auto next = std::next(it);
@@ -2168,7 +2168,7 @@ class raw_hash_set {
   }
 
   template <typename H, typename E>
-  void merge(raw_hash_set<Policy, H, E, Alloc>&& src) {
+  void merge(yobi_raw_hash_set<Policy, H, E, Alloc>&& src) {
     merge(src);
   }
 
@@ -2189,7 +2189,7 @@ class raw_hash_set {
     return it == end() ? node_type() : extract(const_iterator{it});
   }
 
-  void swap(raw_hash_set& that) noexcept(
+  void swap(yobi_raw_hash_set& that) noexcept(
       IsNoThrowSwappable<hasher>() && IsNoThrowSwappable<key_equal>() &&
       IsNoThrowSwappable<allocator_type>(
           typename AllocTraits::propagate_on_container_swap{})) {
@@ -2300,7 +2300,7 @@ class raw_hash_set {
   template <class K = key_type>
   const_iterator find(const key_arg<K>& key,
                       size_t hash) const ABSL_ATTRIBUTE_LIFETIME_BOUND {
-    return const_cast<raw_hash_set*>(this)->find(key, hash);
+    return const_cast<yobi_raw_hash_set*>(this)->find(key, hash);
   }
   template <class K = key_type>
   const_iterator find(const key_arg<K>& key) const
@@ -2342,30 +2342,30 @@ class raw_hash_set {
   key_equal key_eq() const { return eq_ref(); }
   allocator_type get_allocator() const { return alloc_ref(); }
 
-  friend bool operator==(const raw_hash_set& a, const raw_hash_set& b) {
+  friend bool operator==(const yobi_raw_hash_set& a, const yobi_raw_hash_set& b) {
     if (a.size() != b.size()) return false;
-    const raw_hash_set* outer = &a;
-    const raw_hash_set* inner = &b;
+    const yobi_raw_hash_set* outer = &a;
+    const yobi_raw_hash_set* inner = &b;
     if (outer->capacity() > inner->capacity()) std::swap(outer, inner);
     for (const value_type& elem : *outer)
       if (!inner->has_element(elem)) return false;
     return true;
   }
 
-  friend bool operator!=(const raw_hash_set& a, const raw_hash_set& b) {
+  friend bool operator!=(const yobi_raw_hash_set& a, const yobi_raw_hash_set& b) {
     return !(a == b);
   }
 
   template <typename H>
   friend typename std::enable_if<H::template is_hashable<value_type>::value,
                                  H>::type
-  AbslHashValue(H h, const raw_hash_set& s) {
+  AbslHashValue(H h, const yobi_raw_hash_set& s) {
     return H::combine(H::combine_unordered(std::move(h), s.begin(), s.end()),
                       s.size());
   }
 
-  friend void swap(raw_hash_set& a,
-                   raw_hash_set& b) noexcept(noexcept(a.swap(b))) {
+  friend void swap(yobi_raw_hash_set& a,
+                   yobi_raw_hash_set& b) noexcept(noexcept(a.swap(b))) {
     a.swap(b);
   }
 
@@ -2379,7 +2379,7 @@ class raw_hash_set {
     const_iterator operator()(const K& key, Args&&...) const {
       return s.find(key);
     }
-    const raw_hash_set& s;
+    const yobi_raw_hash_set& s;
   };
 
   struct HashElement {
@@ -2409,7 +2409,7 @@ class raw_hash_set {
       }
       return {s.iterator_at(res.first), res.second};
     }
-    raw_hash_set& s;
+    yobi_raw_hash_set& s;
   };
 
   template <bool do_destroy>
@@ -2425,7 +2425,7 @@ class raw_hash_set {
       }
       return {s.iterator_at(res.first), res.second};
     }
-    raw_hash_set& s;
+    yobi_raw_hash_set& s;
     // Constructed slot. Either moved into place or destroyed.
     slot_type&& slot;
   };
@@ -2530,7 +2530,7 @@ class raw_hash_set {
       // 15 to 190, but the number of operations per second is almost the same.
       //
       // Abridged output of running BM_CacheInSteadyState benchmark from
-      // raw_hash_set_benchmark.   N is the number of insert/erase operations.
+      // yobi_raw_hash_set_benchmark.   N is the number of insert/erase operations.
       //
       //      | OLD (recover >= 7/16        | NEW (recover >= 3/32)
       // size |    N/s LoadFactor NRehashes |    N/s LoadFactor NRehashes
@@ -2570,13 +2570,13 @@ class raw_hash_set {
   }
 
   // TODO(alkis): Optimize this assuming *this and that don't overlap.
-  raw_hash_set& move_assign(raw_hash_set&& that, std::true_type) {
-    raw_hash_set tmp(std::move(that));
+  yobi_raw_hash_set& move_assign(yobi_raw_hash_set&& that, std::true_type) {
+    yobi_raw_hash_set tmp(std::move(that));
     swap(tmp);
     return *this;
   }
-  raw_hash_set& move_assign(raw_hash_set&& that, std::false_type) {
-    raw_hash_set tmp(std::move(that), alloc_ref());
+  yobi_raw_hash_set& move_assign(yobi_raw_hash_set&& that, std::false_type) {
+    yobi_raw_hash_set tmp(std::move(that), alloc_ref());
     swap(tmp);
     return *this;
   }
@@ -2635,7 +2635,7 @@ class raw_hash_set {
 
   // Constructs the value in the space pointed by the iterator. This only works
   // after an unsuccessful find_or_prepare_insert() and before any other
-  // modifications happen in the raw_hash_set.
+  // modifications happen in the yobi_raw_hash_set.
   //
   // PRECONDITION: i is an index returned from find_or_prepare_insert(k), where
   // k is the key decomposed from `forward<Args>(args)...`, and the bool
@@ -2702,20 +2702,20 @@ class raw_hash_set {
 
   // Make type-specific functions for this type's PolicyFunctions struct.
   static size_t hash_slot_fn(void* set, void* slot) {
-    auto* h = static_cast<raw_hash_set*>(set);
+    auto* h = static_cast<yobi_raw_hash_set*>(set);
     return PolicyTraits::apply(
         HashElement{h->hash_ref()},
         PolicyTraits::element(static_cast<slot_type*>(slot)));
   }
   static void transfer_slot_fn(void* set, void* dst, void* src) {
-    auto* h = static_cast<raw_hash_set*>(set);
+    auto* h = static_cast<yobi_raw_hash_set*>(set);
     PolicyTraits::transfer(&h->alloc_ref(), static_cast<slot_type*>(dst),
                            static_cast<slot_type*>(src));
   }
   // Note: dealloc_fn will only be used if we have a non-standard allocator.
   static void dealloc_fn(void* set, const PolicyFunctions&, ctrl_t* ctrl,
                          void* slot_mem, size_t n) {
-    auto* h = static_cast<raw_hash_set*>(set);
+    auto* h = static_cast<yobi_raw_hash_set*>(set);
 
     // Unpoison before returning the memory to the allocator.
     SanitizerUnpoisonMemoryRegion(slot_mem, sizeof(slot_type) * n);
@@ -2728,13 +2728,13 @@ class raw_hash_set {
   static const PolicyFunctions& GetPolicyFunctions() {
     static constexpr PolicyFunctions value = {
         sizeof(slot_type),
-        &raw_hash_set::hash_slot_fn,
+        &yobi_raw_hash_set::hash_slot_fn,
         PolicyTraits::transfer_uses_memcpy()
             ? TransferRelocatable<sizeof(slot_type)>
-            : &raw_hash_set::transfer_slot_fn,
+            : &yobi_raw_hash_set::transfer_slot_fn,
         (std::is_same<SlotAlloc, std::allocator<slot_type>>::value
              ? &DeallocateStandard<alignof(slot_type)>
-             : &raw_hash_set::dealloc_fn),
+             : &yobi_raw_hash_set::dealloc_fn),
     };
     return value;
   }
@@ -2749,8 +2749,8 @@ class raw_hash_set {
 
 // Erases all elements that satisfy the predicate `pred` from the container `c`.
 template <typename P, typename H, typename E, typename A, typename Predicate>
-typename raw_hash_set<P, H, E, A>::size_type EraseIf(
-    Predicate& pred, raw_hash_set<P, H, E, A>* c) {
+typename yobi_raw_hash_set<P, H, E, A>::size_type EraseIf(
+    Predicate& pred, yobi_raw_hash_set<P, H, E, A>* c) {
   const auto initial_size = c->size();
   for (auto it = c->begin(), last = c->end(); it != last;) {
     if (pred(*it)) {
@@ -2762,9 +2762,15 @@ typename raw_hash_set<P, H, E, A>::size_type EraseIf(
   return initial_size - c->size();
 }
 
-namespace hashtable_debug_internal {
+}  // namespace container_internal
+ABSL_NAMESPACE_END
+}  // namespace yobi
+
+namespace absl::container_internal::hashtable_debug_internal {
 template <typename Set>
-struct HashtableDebugAccess<Set, absl::void_t<typename Set::raw_hash_set>> {
+struct HashtableDebugAccess<Set, absl::void_t<typename Set::yobi_yobi_raw_hash_set>> {
+  using ctrl_t = yobi::container_internal::ctrl_t;
+  using Group = yobi::container_internal::Group;
   using Traits = typename Set::PolicyTraits;
   using Slot = typename Traits::slot_type;
 
@@ -2775,8 +2781,8 @@ struct HashtableDebugAccess<Set, absl::void_t<typename Set::raw_hash_set>> {
     auto seq = probe(set.common(), hash);
     const ctrl_t* ctrl = set.control();
     while (true) {
-      container_internal::Group g{ctrl + seq.offset()};
-      for (uint32_t i : g.Match(container_internal::H2(hash))) {
+      Group g{ctrl + seq.offset()};
+      for (uint32_t i : g.Match(yobi::container_internal::H2(hash))) {
         if (Traits::apply(
                 typename Set::template EqualElement<typename Set::key_type>{
                     key, set.eq_ref()},
@@ -2793,7 +2799,7 @@ struct HashtableDebugAccess<Set, absl::void_t<typename Set::raw_hash_set>> {
   static size_t AllocatedByteSize(const Set& c) {
     size_t capacity = c.capacity();
     if (capacity == 0) return 0;
-    size_t m = AllocSize(capacity, sizeof(Slot), alignof(Slot));
+    size_t m = yobi::container_internal::AllocSize(capacity, sizeof(Slot), alignof(Slot));
 
     size_t per_slot = Traits::space_used(static_cast<const Slot*>(nullptr));
     if (per_slot != ~size_t{}) {
@@ -2801,7 +2807,7 @@ struct HashtableDebugAccess<Set, absl::void_t<typename Set::raw_hash_set>> {
     } else {
       const ctrl_t* ctrl = c.control();
       for (size_t i = 0; i != capacity; ++i) {
-        if (container_internal::IsFull(ctrl[i])) {
+        if (yobi::container_internal::IsFull(ctrl[i])) {
           m += Traits::space_used(c.slot_array() + i);
         }
       }
@@ -2810,10 +2816,10 @@ struct HashtableDebugAccess<Set, absl::void_t<typename Set::raw_hash_set>> {
   }
 
   static size_t LowerBoundAllocatedByteSize(size_t size) {
-    size_t capacity = GrowthToLowerboundCapacity(size);
+    size_t capacity = yobi::container_internal::GrowthToLowerboundCapacity(size);
     if (capacity == 0) return 0;
     size_t m =
-        AllocSize(NormalizeCapacity(capacity), sizeof(Slot), alignof(Slot));
+        yobi::container_internal::AllocSize(yobi::container_internal::NormalizeCapacity(capacity), sizeof(Slot), alignof(Slot));
     size_t per_slot = Traits::space_used(static_cast<const Slot*>(nullptr));
     if (per_slot != ~size_t{}) {
       m += per_slot * size;
@@ -2823,10 +2829,7 @@ struct HashtableDebugAccess<Set, absl::void_t<typename Set::raw_hash_set>> {
 };
 
 }  // namespace hashtable_debug_internal
-}  // namespace container_internal
-ABSL_NAMESPACE_END
-}  // namespace yobi
 
 #undef ABSL_SWISSTABLE_ENABLE_GENERATIONS
 
-#endif  // ABSL_CONTAINER_INTERNAL_RAW_HASH_SET_H_
+#endif  // ABSL_CONTAINER_INTERNAL_YOBI_RAW_HASH_SET_H_
