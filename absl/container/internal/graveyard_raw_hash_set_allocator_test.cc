@@ -19,9 +19,9 @@
 #include "absl/container/internal/graveyard_raw_hash_set.h"
 #include "absl/container/internal/tracked.h"
 
-namespace yobi {
+namespace absl {
 ABSL_NAMESPACE_BEGIN
-namespace container_internal {
+namespace graveyard_container_internal {
 namespace {
 
 using absl::container_internal::Tracked;
@@ -502,6 +502,6 @@ TEST(NoPropagateOn, Assignment) {
 }
 
 }  // namespace
-}  // namespace container_internal
+}  // namespace graveyard_container_internal
 ABSL_NAMESPACE_END
 }  // namespace absl

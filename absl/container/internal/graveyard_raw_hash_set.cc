@@ -22,9 +22,9 @@
 #include "absl/base/dynamic_annotations.h"
 #include "absl/hash/hash.h"
 
-namespace yobi {
+namespace absl {
 ABSL_NAMESPACE_BEGIN
-namespace container_internal {
+namespace graveyard_container_internal {
 
 // A single block of empty control bytes for tables without any slots allocated.
 // This enables removing a branch in the hot path of find().
@@ -249,6 +249,6 @@ void ClearBackingArray(CommonFields& c, const PolicyFunctions& policy,
   }
 }
 
-}  // namespace container_internal
+}  // namespace graveyard_container_internal
 ABSL_NAMESPACE_END
-}  // namespace yobi
+}  // namespace absl
