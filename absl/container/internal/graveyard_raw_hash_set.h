@@ -217,7 +217,7 @@
 #include <arm_neon.h>
 #endif
 
-namespace yobi {
+namespace absl {
 ABSL_NAMESPACE_BEGIN
 
 using absl::countl_zero;
@@ -227,7 +227,7 @@ namespace little_endian {
 using absl::little_endian::Load64;
 using absl::little_endian::Store64;
 }
-namespace container_internal {
+namespace graveyard_container_internal {
 using absl::container_internal::Allocate;
 using absl::container_internal::CommonAccess;
 using absl::container_internal::Deallocate;
@@ -240,11 +240,6 @@ using absl::container_internal::InsertReturnType;
 using absl::container_internal::node_handle;
 using absl::container_internal::SanitizerPoisonMemoryRegion;
 using absl::container_internal::SanitizerUnpoisonMemoryRegion;
-//using absl::container_internal::hashtable_debug_internal::
-//      HashtableDebugAccess;
-}
-
-namespace container_internal {
 
 #ifdef ABSL_SWISSTABLE_ENABLE_GENERATIONS
 #error ABSL_SWISSTABLE_ENABLE_GENERATIONS cannot be directly set
@@ -393,7 +388,7 @@ class NonIterableBitMask {
 
   // Returns the index of the lowest *abstract* bit set in `self`.
   uint32_t LowestBitSet() const {
-    return container_internal::TrailingZeros(mask_) >> Shift;
+    return graveyard_container_internal::TrailingZeros(mask_) >> Shift;
   }
 
   // Returns the index of the highest *abstract* bit set in `self`.
@@ -403,7 +398,7 @@ class NonIterableBitMask {
 
   // Return the number of trailing zero *abstract* bits.
   uint32_t TrailingZeros() const {
-    return container_internal::TrailingZeros(mask_) >> Shift;
+    return graveyard_container_internal::TrailingZeros(mask_) >> Shift;
   }
 
   // Return the number of leading zero *abstract* bits.
@@ -2762,15 +2757,13 @@ typename graveyard_raw_hash_set<P, H, E, A>::size_type EraseIf(
   return initial_size - c->size();
 }
 
-}  // namespace container_internal
-ABSL_NAMESPACE_END
-}  // namespace yobi
+}  // namespace graveyard_container_internal
 
-namespace absl::container_internal::hashtable_debug_internal {
+namespace container_internal::hashtable_debug_internal {
 template <typename Set>
 struct HashtableDebugAccess<Set, absl::void_t<typename Set::graveyard_raw_hash_set>> {
-  using ctrl_t = yobi::container_internal::ctrl_t;
-  using Group = yobi::container_internal::Group;
+  using ctrl_t = graveyard_container_internal::ctrl_t;
+  using Group = graveyard_container_internal::Group;
   using Traits = typename Set::PolicyTraits;
   using Slot = typename Traits::slot_type;
 
@@ -2782,7 +2775,7 @@ struct HashtableDebugAccess<Set, absl::void_t<typename Set::graveyard_raw_hash_s
     const ctrl_t* ctrl = set.control();
     while (true) {
       Group g{ctrl + seq.offset()};
-      for (uint32_t i : g.Match(yobi::container_internal::H2(hash))) {
+      for (uint32_t i : g.Match(graveyard_container_internal::H2(hash))) {
         if (Traits::apply(
                 typename Set::template EqualElement<typename Set::key_type>{
                     key, set.eq_ref()},
@@ -2799,7 +2792,7 @@ struct HashtableDebugAccess<Set, absl::void_t<typename Set::graveyard_raw_hash_s
   static size_t AllocatedByteSize(const Set& c) {
     size_t capacity = c.capacity();
     if (capacity == 0) return 0;
-    size_t m = yobi::container_internal::AllocSize(capacity, sizeof(Slot), alignof(Slot));
+    size_t m = graveyard_container_internal::AllocSize(capacity, sizeof(Slot), alignof(Slot));
 
     size_t per_slot = Traits::space_used(static_cast<const Slot*>(nullptr));
     if (per_slot != ~size_t{}) {
@@ -2807,7 +2800,7 @@ struct HashtableDebugAccess<Set, absl::void_t<typename Set::graveyard_raw_hash_s
     } else {
       const ctrl_t* ctrl = c.control();
       for (size_t i = 0; i != capacity; ++i) {
-        if (yobi::container_internal::IsFull(ctrl[i])) {
+        if (graveyard_container_internal::IsFull(ctrl[i])) {
           m += Traits::space_used(c.slot_array() + i);
         }
       }
@@ -2816,10 +2809,10 @@ struct HashtableDebugAccess<Set, absl::void_t<typename Set::graveyard_raw_hash_s
   }
 
   static size_t LowerBoundAllocatedByteSize(size_t size) {
-    size_t capacity = yobi::container_internal::GrowthToLowerboundCapacity(size);
+    size_t capacity = graveyard_container_internal::GrowthToLowerboundCapacity(size);
     if (capacity == 0) return 0;
     size_t m =
-        yobi::container_internal::AllocSize(yobi::container_internal::NormalizeCapacity(capacity), sizeof(Slot), alignof(Slot));
+        graveyard_container_internal::AllocSize(graveyard_container_internal::NormalizeCapacity(capacity), sizeof(Slot), alignof(Slot));
     size_t per_slot = Traits::space_used(static_cast<const Slot*>(nullptr));
     if (per_slot != ~size_t{}) {
       m += per_slot * size;
@@ -2829,6 +2822,8 @@ struct HashtableDebugAccess<Set, absl::void_t<typename Set::graveyard_raw_hash_s
 };
 
 }  // namespace hashtable_debug_internal
+ABSL_NAMESPACE_END
+}  // namespace absl
 
 #undef ABSL_SWISSTABLE_ENABLE_GENERATIONS
 

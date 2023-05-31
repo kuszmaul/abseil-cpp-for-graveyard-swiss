@@ -51,9 +51,9 @@
 #include "absl/log/log.h"
 #include "absl/strings/string_view.h"
 
-namespace yobi {
+namespace absl {
 ABSL_NAMESPACE_BEGIN
-namespace container_internal {
+namespace graveyard_container_internal {
 
 struct RawHashSetTestOnlyAccess {
   template <typename C>
@@ -2408,6 +2408,6 @@ TEST(Iterator, InvalidComparisonDifferentTables) {
 }
 
 }  // namespace
-}  // namespace container_internal
+}  // namespace graveyard_container_internal
 ABSL_NAMESPACE_END
-}  // namespace yobi
+}  // namespace absl
