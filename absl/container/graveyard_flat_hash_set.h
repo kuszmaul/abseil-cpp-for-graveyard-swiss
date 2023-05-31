@@ -26,8 +26,8 @@
 //
 // In most cases, your default choice for a hash set should be a set of type
 // `flat_hash_set`.
-#ifndef ABSL_CONTAINER_FLAT_HASH_SET_H_
-#define ABSL_CONTAINER_FLAT_HASH_SET_H_
+#ifndef ABSL_CONTAINER_GRAVEYARD_FLAT_HASH_SET_H_
+#define ABSL_CONTAINER_GRAVEYARD_FLAT_HASH_SET_H_
 
 #include <type_traits>
 #include <utility>
@@ -500,4 +500,4 @@ struct IsUnorderedContainer<absl::graveyard_flat_hash_set<Key, Hash, KeyEqual, A
 ABSL_NAMESPACE_END
 }  // namespace absl
 
-#endif  // ABSL_CONTAINER_FLAT_HASH_SET_H_
+#endif  // ABSL_CONTAINER_GRAVEYARD_FLAT_HASH_SET_H_
