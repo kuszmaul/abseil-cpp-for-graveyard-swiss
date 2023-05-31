@@ -276,6 +276,21 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "graveyard_flat_hash_set",
+    hdrs = ["graveyard_flat_hash_set.h"],
+    copts = ABSL_DEFAULT_COPTS,
+    linkopts = ABSL_DEFAULT_LINKOPTS,
+    deps = [
+        ":container_memory",
+        ":hash_function_defaults",
+        ":graveyard_raw_hash_set",
+        "//absl/algorithm:container",
+        "//absl/base:core_headers",
+        "//absl/memory",
+    ],
+)
+
 cc_test(
     name = "flat_hash_set_test",
     srcs = ["flat_hash_set_test.cc"],
@@ -290,6 +305,26 @@ cc_test(
         ":unordered_set_members_test",
         ":unordered_set_modifiers_test",
         "//absl/log:check",
+        "//absl/memory",
+        "//absl/strings",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "graveyard_flat_hash_set_test",
+    srcs = ["graveyard_flat_hash_set_test.cc"],
+    copts = ABSL_TEST_COPTS + ["-DUNORDERED_SET_CXX17"],
+    linkopts = ABSL_DEFAULT_LINKOPTS,
+    tags = ["no_test_loonix"],
+    deps = [
+        ":graveyard_flat_hash_set",
+        ":hash_generator_testing",
+        ":unordered_set_constructor_test",
+        ":unordered_set_lookup_test",
+        ":unordered_set_members_test",
+        ":unordered_set_modifiers_test",
+        "//absl/base:raw_logging_internal",
         "//absl/memory",
         "//absl/strings",
         "@com_google_googletest//:gtest_main",
