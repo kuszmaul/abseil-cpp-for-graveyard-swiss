@@ -382,6 +382,22 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "graveyard_node_hash_map",
+    hdrs = ["graveyard_node_hash_map.h"],
+    copts = ABSL_DEFAULT_COPTS,
+    linkopts = ABSL_DEFAULT_LINKOPTS,
+    deps = [
+        ":container_memory",
+        ":hash_function_defaults",
+        ":node_slot_policy",
+        ":graveyard_raw_hash_map",
+        "//absl/algorithm:container",
+        "//absl/base:core_headers",
+        "//absl/memory",
+    ],
+)
+
 cc_test(
     name = "node_hash_map_test",
     srcs = ["node_hash_map_test.cc"],
@@ -400,6 +416,23 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "graveyard_node_hash_map_test",
+    srcs = ["graveyard_node_hash_map_test.cc"],
+    copts = ABSL_TEST_COPTS,
+    linkopts = ABSL_DEFAULT_LINKOPTS,
+    tags = ["no_test_loonix"],
+    deps = [
+        ":hash_generator_testing",
+        ":graveyard_node_hash_map",
+        ":tracked",
+        ":unordered_map_constructor_test",
+        ":unordered_map_lookup_test",
+        ":unordered_map_members_test",
+        ":unordered_map_modifiers_test",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
 cc_library(
     name = "node_hash_set",
     hdrs = ["node_hash_set.h"],
