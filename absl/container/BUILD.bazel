@@ -242,6 +242,21 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "graveyard_flat_hash_map",
+    hdrs = ["graveyard_flat_hash_map.h"],
+    copts = ABSL_DEFAULT_COPTS,
+    linkopts = ABSL_DEFAULT_LINKOPTS,
+    deps = [
+        ":container_memory",
+        ":hash_function_defaults",
+        ":graveyard_raw_hash_map",
+        "//absl/algorithm:container",
+        "//absl/base:core_headers",
+        "//absl/memory",
+    ],
+)
+
 cc_test(
     name = "flat_hash_map_test",
     srcs = ["flat_hash_map_test.cc"],
@@ -260,6 +275,26 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "graveyard_flat_hash_map_test",
+    srcs = ["graveyard_flat_hash_map_test.cc"],
+    copts = ABSL_TEST_COPTS,
+    linkopts = ABSL_DEFAULT_LINKOPTS,
+    tags = ["no_test_loonix"],
+    deps = [
+        ":graveyard_flat_hash_map",
+        ":hash_generator_testing",
+        ":unordered_map_constructor_test",
+        ":unordered_map_lookup_test",
+        ":unordered_map_members_test",
+        ":unordered_map_modifiers_test",
+        "//absl/base:raw_logging_internal",
+        "//absl/types:any",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 
 cc_library(
     name = "flat_hash_set",
@@ -627,6 +662,18 @@ cc_library(
     deps = [
         ":container_memory",
         ":raw_hash_set",
+        "//absl/base:throw_delegate",
+    ],
+)
+
+cc_library(
+    name = "graveyard_raw_hash_map",
+    hdrs = ["internal/graveyard_raw_hash_map.h"],
+    copts = ABSL_DEFAULT_COPTS,
+    linkopts = ABSL_DEFAULT_LINKOPTS,
+    deps = [
+        ":container_memory",
+        ":graveyard_raw_hash_set",
         "//absl/base:throw_delegate",
     ],
 )
