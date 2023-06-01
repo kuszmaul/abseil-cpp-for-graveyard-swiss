@@ -61,8 +61,7 @@
 //     // Usually SlotsPerBucket==14 .
 //     ctrl_t ctrl[SlotsPerBucket];
 //     uint16_t last_bucket : 1;
-//     uint16_t contains_wrapped_unordered_slot : 1;
-//     uint16_t search_distance : 14;
+//     uint16_t search_distance : 15;
 //     // slots may or may not contain objects.
 //     slot_type slots[SlotsPerBucket];
 //   };
@@ -93,9 +92,9 @@
 //
 // It turns out that since we wrap around at the end of the table, the ordering
 // property is a little bit more complex.  The first few buckets may contain
-// values that have very large hashes.  We keep track of which buckets contain
-// values that really wanted to be at the very end of the array but were wrapped
-// around (using `contains_wrapped_unordered_slot`.
+// values that have very large hashes.  If a slot contains a value whose `H1` is
+// greater than the bucket number, then we know that the value was wrapped
+// around.
 //
 // There are no explicit tombstones, just empty slots.
 //
