@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-// An open-addressing
-// hashtable with quadratic probing.
+// An open-addressed hash table with implicit graveyard hashing.
 //
 // This is a low level hashtable on top of which different interfaces can be
 // implemented, like flat_hash_set, node_hash_set, string_hash_set, etc.
@@ -55,69 +54,83 @@
 //
 // # Table Layout
 //
-// A raw_hash_set's backing array consists of control bytes followed by slots
-// that may or may not contain objects.
+// A graveyard_raw_hash_set's backing storage is an array of buckets.  Each
+// bucket is a pseudo-struct:
 //
-// The layout of the backing array, for `capacity` slots, is thus, as a
-// pseudo-struct:
-//
-//   struct BackingArray {
-//     // Control bytes for the "real" slots.
-//     ctrl_t ctrl[capacity];
-//     // Always `ctrl_t::kSentinel`. This is used by iterators to find when to
-//     // stop and serves no other purpose.
-//     ctrl_t sentinel;
-//     // A copy of the first `kWidth - 1` elements of `ctrl`. This is used so
-//     // that if a probe sequence picks a value near the end of `ctrl`,
-//     // `Group` will have valid control bytes to look at.
-//     ctrl_t clones[kWidth - 1];
-//     // The actual slot data.
-//     slot_type slots[capacity];
+//   struct Bucket {
+//     // Usually SlotsPerBucket==14 .
+//     ctrl_t ctrl[SlotsPerBucket];
+//     uint16_t last_bucket : 1;
+//     uint16_t contains_wrapped_unordered_slot : 1;
+//     uint16_t search_distance : 14;
+//     // slots may or may not contain objects.
+//     slot_type slots[SlotsPerBucket];
 //   };
+//
+// For very small tables the Bucket may be truncated (e.g., if capacity()==1,
+// there is space for only one slot, although there are still 14 ctrl bytes.
+// The unused ctrl bytes will always indicate "empty".
 //
 // The length of this array is computed by `AllocSize()` below.
 //
-// Control bytes (`ctrl_t`) are bytes (collected into groups of a
-// platform-specific size) that define the state of the corresponding slot in
-// the slot array. Group manipulation is tightly optimized to be as efficient
-// as possible: SSE and friends on x86, clever bit operations on other arches.
+// Control bytes (`ctrl_t`) are bytes that define the state of the corresponding
+// slot in the slot array. Group manipulation is tightly optimized to be as
+// efficient as possible: SSE and friends on x86, clever bit operations on other
+// arches.
 //
-//      Group 1         Group 2        Group 3
-// +---------------+---------------+---------------+
-// | | | | | | | | | | | | | | | | | | | | | | | | |
-// +---------------+---------------+---------------+
+// Each control byte is either a special value for empty slots, (sometimes
+// called *tombstones*), or else a value for full slots.  There is one value
+// used for empty slots, 254 values used for full slots, and one unused values.
+// Of the 254 values, 1 bit is used to indicate that the occupied slot may be
+// out of order.
 //
-// Each control byte is either a special value for empty slots, deleted slots
-// (sometimes called *tombstones*), and a special end-of-table marker used by
-// iterators, or, if occupied, seven bits (H2) from the hash of the value in the
-// corresponding slot.
+// We maintain occupied slots in hash order, as much as possible.  Given pointers
+// to slots, `a` and `b`, in the same table (possibly in different buckets) with
+// `a < b`, we say that the slots are properly ordered `hash(*a) <= hash(*b)`.
+// After rehashing, all pairs of slots are properly ordered.  Newly inserted
+// slots are not properly ordered.  The `ctrl` byte keeps track of which slots
+// might be out of order.
 //
-// Storing control bytes in a separate array also has beneficial cache effects,
-// since more logical slots will fit into a cache line.
+// It turns out that since we wrap around at the end of the table, the ordering
+// property is a little bit more complex.  The first few buckets may contain
+// values that have very large hashes.  We keep track of which buckets contain
+// values that really wanted to be at the very end of the array but were wrapped
+// around (using `contains_wrapped_unordered_slot`.
+//
+// There are no explicit tombstones, just empty slots.
 //
 // # Hashing
 //
 // We compute two separate hashes, `H1` and `H2`, from the hash of an object.
-// `H1(hash(x))` is an index into `slots`, and essentially the starting point
-// for the probe sequence. `H2(hash(x))` is a 7-bit value used to filter out
-// objects that cannot possibly be the one we are looking for.
+// `H1(hash(x))` is a bucket number, and essentially the starting point for the
+// probe sequence. `H2(hash(x))` is a 7-bit value used to filter out objects
+// that cannot possibly be the one we are looking for.
+//
+// We compute `H1` from the high order bits of `hash(x)` (see
+// https://lemire.me/blog/2016/06/27/a-fast-alternative-to-the-modulo-reduction/).
+//
+// We compute `H2` (a value in the range `[0, 127)`) simply by writing `hash(v)
+// % 127` and relying on the compiler to do a good job of modulo by a
+// non-power-of-two constant.
 //
 // # Table operations.
 //
 // The key operations are `insert`, `find`, and `erase`.
 //
 // Since `insert` and `erase` are implemented in terms of `find`, we describe
-// `find` first. To `find` a value `x`, we compute `hash(x)`. From
-// `H1(hash(x))` and the capacity, we construct a `probe_seq` that visits every
-// group of slots in some interesting order.
+// `find` first. To `find` a value `x`, we compute `hash(x)`. We start looking
+// in bucket `H1(hash(x))`, doing linear probing, looking at subsequent buckets.
+// We know, due to the graveyard hashing theory, that linear probing works well
+// (assuming that the hash function is good).  Many implementors had assumed
+// that linear probing works poorly because of Knuth's original result.  It's
+// actually not so bad, and when combined with graveyard tombstones, linear
+// probing is actually very good.
 //
-// We now walk through these indices. At each index, we select the entire group
-// starting with that index and extract potential candidates: occupied slots
-// with a control byte equal to `H2(hash(x))`. If we find an empty slot in the
-// group, we stop and return an error. Each candidate slot `y` is compared with
-// `x`; if `x == y`, we are done and return `&y`; otherwise we continue to the
-// next probe index. Tombstones effectively behave like full slots that never
-// match the value we're looking for.
+// We now walk through the buckets (wrapping around at the end).  At each index,
+// we read all 14 bytes in the bucket and extract potential candidates: occupied
+// slots with a H2 value equal to `H2(hash(x))`.  Each candidate slot `y` is
+// compared with `x`; if `x == y`, we are done and return `&y`; otherwise we
+// continue to the next probe index.
 //
 // The `H2` bits ensure when we compare a slot to an object with `==`, we are
 // likely to have actually found the object.  That is, the chance is low that
@@ -129,45 +142,68 @@
 // probe sequence.  For example, when doing a `find` on an object that is in the
 // table, `k` is the number of objects between the start of the probe sequence
 // and the final found object (not including the final found object).  The
-// expected number of objects with an H2 match is then `k/128`.  Measurements
+// expected number of objects with an H2 match is then `k/127`.  Measurements
 // and analysis indicate that even at high load factors, `k` is less than 32,
 // meaning that the number of "false positive" comparisons we must perform is
 // less than 1/8 per `find`.
-
-// `insert` is implemented in terms of `unchecked_insert`, which inserts a
-// value presumed to not be in the table (violating this requirement will cause
-// the table to behave erratically). Given `x` and its hash `hash(x)`, to insert
-// it, we construct a `probe_seq` once again, and use it to find the first
-// group with an unoccupied (empty *or* deleted) slot. We place `x` into the
-// first such slot in the group and mark it as full with `x`'s H2.
+//
+// `insert` is implemented in terms of `unchecked_insert`, which inserts a value
+// presumed to not be in the table (violating this requirement will cause the
+// table to behave erratically). Given `x` and its hash `hash(x)`, to insert it,
+// we construct a `probe_seq` once again, and use it to find the first group
+// with an unoccupied slot. We place `x` into the first such slot in the group
+// and mark it as full with `x`'s H2.
 //
 // To `insert`, we compose `unchecked_insert` with `find`. We compute `h(x)` and
 // perform a `find` to see if it's already present; if it is, we're done. If
 // it's not, we may decide the table is getting overcrowded (i.e. the load
-// factor is greater than 7/8 for big tables; `is_small()` tables use a max load
-// factor of 1); in this case, we allocate a bigger array, `unchecked_insert`
-// each element of the table into the new array (we know that no insertion here
-// will insert an already-present value), and discard the old backing array. At
-// this point, we may `unchecked_insert` the value `x`.
+// factor is greater than some constant (perhaps 7/8) for big tables;
+// `is_small()` tables use a max load factor of 1); in this case, we allocate a
+// bigger array, and move the values into the new array.  We do this move so
+// that after the rehash, all the values in the table will be in hash order.
+//
+// We do this by scanning through the table, merging sorted values with the
+// unsorted values.  When we encounter an unsorted value, we remember it in a
+// heap data structure.  When we encounter a sorted value, if it's less than the
+// smallest item in the heap, we place it in the destination table, otherwise we
+// move the unsorted item to the destination.  Whenever we encounter a new
+// bucket in the source table, we scan forward to find all the unsorted values
+// (using the search_distance to limit how fare we have to look into the future.
+//
+// For example, for a table that is rehashed when it's 90% full, and we rehash
+// it to be 80% full, only 10% of the items are out of order, and on average we
+// need to examine just over one bucket, so the number of items in the heap is
+// small (one or two).  For a table that's rehashed down to 50% full, it will
+// turn out there are many unordered values.  It's probably better to simply run
+// at a relatively high load factor, and rehash the table more often.
+//
+// The rehash also takes care to limit the high-water mark for memory: Since we
+// are scanning the old table from left to right, and inserting into the new
+// table from left to right, we don't actually need both tables to fully occupy
+// RAM at the same time.  We can use `madvise(DONT_NEED)` to cause parts of the
+// old table to have their physical memory deallocated as we fill in the new
+// table.
+//
+// After moving everything from the old to the new backing storage, we can
+// discard the old strorage.  At this point, we may `unchecked_insert` the value
+// `x`.
 //
 // Below, `unchecked_insert` is partly implemented by `prepare_insert`, which
 // presents a viable, initialized slot pointee to the caller.
 //
 // `erase` is implemented in terms of `erase_at`, which takes an index to a
-// slot. Given an offset, we simply create a tombstone and destroy its contents.
-// If we can prove that the slot would not appear in a probe sequence, we can
-// make the slot as empty, instead. We can prove this by observing that if a
-// group has any empty slots, it has never been full (assuming we never create
-// an empty slot in a group with no empties, which this heuristic guarantees we
-// never do) and find would stop at this group anyways (since it does not probe
-// beyond groups with empties).
+// slot. Given an offset, we simply mark it empty and destroy its contents.  We
+// don't bother to try to update the search distance, since that will be fixed
+// up on the next rehash anyway.
 //
-// `erase` is `erase_at` composed with `find`: if we
-// have a value `x`, we can perform a `find`, and then `erase_at` the resulting
-// slot.
+// `erase` is `erase_at` composed with `find`: if we have a value `x`, we can
+// perform a `find`, and then `erase_at` the resulting slot.
 //
-// To iterate, we simply traverse the array, skipping empty and deleted slots
-// and stopping when we hit a `kSentinel`.
+// To iterate, we simply traverse the buckets array, skipping empty slots and
+// stopping when we have searched `search_distance` buckets.
+//
+// If we discover that the hash function is bad (because we are getting long
+// probe sequences), which switch to simply using `std::unordered_set`.
 
 #ifndef ABSL_CONTAINER_INTERNAL_GRAVEYARD_RAW_HASH_SET_H_
 #define ABSL_CONTAINER_INTERNAL_GRAVEYARD_RAW_HASH_SET_H_
