@@ -754,12 +754,37 @@ cc_library(
 )
 
 cc_library(
+    name = "bit_mask",
+     hdrs = ["internal/bit_mask.h"],
+    copts = ABSL_DEFAULT_COPTS,
+    linkopts = ABSL_DEFAULT_LINKOPTS,
+    deps = [
+        "//absl/base:config",
+        "//absl/base:core_headers",
+        "//absl/numeric:bits",
+    ],
+)
+
+cc_test(
+    name = "bit_mask_test",
+    srcs = ["internal/bit_mask_test.cc"],
+    copts = ABSL_DEFAULT_COPTS,
+    linkopts = ABSL_DEFAULT_LINKOPTS,
+    deps = [
+        ":bit_mask",
+        "//absl/base:config",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "raw_hash_set",
     srcs = ["internal/raw_hash_set.cc"],
     hdrs = ["internal/raw_hash_set.h"],
     copts = ABSL_DEFAULT_COPTS,
     linkopts = ABSL_DEFAULT_LINKOPTS,
     deps = [
+        ":bit_mask",
         ":common",
         ":compressed_tuple",
         ":container_memory",
@@ -787,6 +812,7 @@ cc_library(
     copts = ABSL_DEFAULT_COPTS,
     linkopts = ABSL_DEFAULT_LINKOPTS,
     deps = [
+        ":bit_mask",
         ":common",
         ":compressed_tuple",
         ":container_memory",
