@@ -326,53 +326,29 @@ void SwapAlloc(AllocType& /*lhs*/, AllocType& /*rhs*/,
 
 // The state for a probe sequence.
 //
-// Currently, the sequence is a triangular progression of the form
+// The sequence is simply a linear progression
 //
-//   p(i) := Width * (i^2 + i)/2 + hash (mod mask + 1)
-//
-// The use of `Width` ensures that each probe step does not overlap groups;
-// the sequence effectively outputs the addresses of *groups* (although not
-// necessarily aligned to any boundary). The `Group` machinery allows us
-// to check an entire group with minimal branching.
-//
-// Wrapping around at `mask + 1` is important, but not for the obvious reason.
-// As described above, the first few entries of the control byte array
-// are mirrored at the end of the array, which `Group` will find and use
-// for selecting candidates. However, when those candidates' slots are
-// actually inspected, there are no corresponding slots for the cloned bytes,
-// so we need to make sure we've treated those offsets as "wrapping around".
-//
-// It turns out that this probe sequence visits every group exactly once if the
-// number of groups is a power of two, since (i^2+i)/2 is a bijection in
-// Z/(2^m). See https://en.wikipedia.org/wiki/Quadratic_probing
-template <size_t Width>
+//   p(i) := i mod bucket_count;
 class probe_seq {
  public:
   // Creates a new probe sequence using `hash` as the initial value of the
   // sequence and `mask` (usually the capacity of the table) as the mask to
   // apply to each value in the progression.
-  probe_seq(size_t hash, size_t mask) {
-    assert(((mask + 1) & mask) == 0 && "not a mask");
-    mask_ = mask;
-    offset_ = hash & mask_;
+  probe_seq(size_t h1, size_t bucket_count) :index_(h1), bucket_count_(bucket_count) {
   }
 
-  // The offset within the table, i.e., the value `p(i)` above.
-  size_t offset() const { return offset_; }
-  size_t offset(size_t i) const { return (offset_ + i) & mask_; }
-
   void next() {
-    index_ += Width;
-    offset_ += index_;
-    offset_ &= mask_;
+    ++index_;
+    if (index_ == bucket_count_) {
+      index_ = 0;
+    }
   }
   // 0-based probe index, a multiple of `Width`.
   size_t index() const { return index_; }
 
  private:
-  size_t mask_;
-  size_t offset_;
   size_t index_ = 0;
+  size_t bucket_count_;
 };
 
 using h2_t = uint8_t;
