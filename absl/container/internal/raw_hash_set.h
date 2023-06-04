@@ -197,6 +197,7 @@
 #include "absl/container/internal/hash_policy_traits.h"
 #include "absl/container/internal/hashtable_debug_hooks.h"
 #include "absl/container/internal/hashtablez_sampler.h"
+#include "absl/container/internal/raw_traits.h"
 #include "absl/memory/memory.h"
 #include "absl/meta/type_traits.h"
 #include "absl/numeric/bits.h"
@@ -313,37 +314,6 @@ class probe_seq {
   size_t offset_;
   size_t index_ = 0;
 };
-
-template <class ContainerKey, class Hash, class Eq>
-struct RequireUsableKey {
-  template <class PassedKey, class... Args>
-  std::pair<
-      decltype(std::declval<const Hash&>()(std::declval<const PassedKey&>())),
-      decltype(std::declval<const Eq&>()(std::declval<const ContainerKey&>(),
-                                         std::declval<const PassedKey&>()))>*
-  operator()(const PassedKey&, const Args&...) const;
-};
-
-template <class E, class Policy, class Hash, class Eq, class... Ts>
-struct IsDecomposable : std::false_type {};
-
-template <class Policy, class Hash, class Eq, class... Ts>
-struct IsDecomposable<
-    absl::void_t<decltype(Policy::apply(
-        RequireUsableKey<typename Policy::key_type, Hash, Eq>(),
-        std::declval<Ts>()...))>,
-    Policy, Hash, Eq, Ts...> : std::true_type {};
-
-// TODO(alkis): Switch to std::is_nothrow_swappable when gcc/clang supports it.
-template <class T>
-constexpr bool IsNoThrowSwappable(std::true_type = {} /* is_swappable */) {
-  using std::swap;
-  return noexcept(swap(std::declval<T&>(), std::declval<T&>()));
-}
-template <class T>
-constexpr bool IsNoThrowSwappable(std::false_type /* is_swappable */) {
-  return false;
-}
 
 using h2_t = uint8_t;
 

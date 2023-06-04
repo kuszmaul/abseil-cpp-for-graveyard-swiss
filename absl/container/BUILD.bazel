@@ -755,7 +755,7 @@ cc_library(
 
 cc_library(
     name = "bit_mask",
-     hdrs = ["internal/bit_mask.h"],
+    hdrs = ["internal/bit_mask.h"],
     copts = ABSL_DEFAULT_COPTS,
     linkopts = ABSL_DEFAULT_LINKOPTS,
     deps = [
@@ -778,6 +778,15 @@ cc_test(
 )
 
 cc_library(
+    name = "raw_traits",
+    hdrs = ["internal/raw_traits.h"],
+    copts = ABSL_DEFAULT_COPTS,
+    linkopts = ABSL_DEFAULT_LINKOPTS,
+    deps = [
+    ],
+)
+
+cc_library(
     name = "raw_hash_set",
     srcs = ["internal/raw_hash_set.cc"],
     hdrs = ["internal/raw_hash_set.h"],
@@ -791,6 +800,7 @@ cc_library(
         ":hash_policy_traits",
         ":hashtable_debug_hooks",
         ":hashtablez_sampler",
+	":raw_traits",
         "//absl/base:config",
         "//absl/base:core_headers",
         "//absl/base:dynamic_annotations",
@@ -819,6 +829,7 @@ cc_library(
         ":hash_policy_traits",
         ":hashtable_debug_hooks",
         ":hashtablez_sampler",
+	":raw_traits",
         "//absl/base:config",
         "//absl/base:core_headers",
         "//absl/base:dynamic_annotations",
