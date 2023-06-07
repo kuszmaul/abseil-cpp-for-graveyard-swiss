@@ -28,11 +28,14 @@ namespace graveyard_container_internal {
 
 // A single block of empty control bytes for tables without any slots allocated.
 // This enables removing a branch in the hot path of find().
-alignas(16) ABSL_CONST_INIT ABSL_DLL const ctrl_t kEmptyGroup[16] = {
-    ctrl_t::kSentinel, ctrl_t::kEmpty, ctrl_t::kEmpty, ctrl_t::kEmpty,
-    ctrl_t::kEmpty,    ctrl_t::kEmpty, ctrl_t::kEmpty, ctrl_t::kEmpty,
-    ctrl_t::kEmpty,    ctrl_t::kEmpty, ctrl_t::kEmpty, ctrl_t::kEmpty,
-    ctrl_t::kEmpty,    ctrl_t::kEmpty, ctrl_t::kEmpty, ctrl_t::kEmpty};
+template
+alignas(16) ABSL_CONST_INIT ABSL_DLL const EmptyData<14> kEmptyData = {
+  .ctrl = {ctrl_t::kEmpty, ctrl_t::kEmpty,
+           ctrl_t::kEmpty,    ctrl_t::kEmpty, ctrl_t::kEmpty, ctrl_t::kEmpty,
+           ctrl_t::kEmpty,    ctrl_t::kEmpty, ctrl_t::kEmpty, ctrl_t::kEmpty,
+           ctrl_t::kEmpty,    ctrl_t::kEmpty, ctrl_t::kEmpty, ctrl_t::kEmpty},
+  .search_distance = 0,
+  .is_last_bucket = 1};
 
 #ifdef ABSL_INTERNAL_NEED_REDUNDANT_CONSTEXPR_DECL
 constexpr size_t Group::kWidth;
@@ -67,20 +70,6 @@ GenerationType* EmptyGeneration() {
         &kEmptyGenerations[RandomSeed() % kNumEmptyGenerations]);
   }
   return nullptr;
-}
-
-bool CommonFieldsGenerationInfoEnabled::
-    should_rehash_for_bug_detection_on_insert(const ctrl_t* ctrl,
-                                              size_t capacity) const {
-  if (reserved_growth_ == kReservedGrowthJustRanOut) return true;
-  if (reserved_growth_ > 0) return false;
-  // Note: we can't use the abseil-random library because abseil-random
-  // depends on swisstable. We want to return true with probability
-  // `min(1, RehashProbabilityConstant() / capacity())`. In order to do this,
-  // we probe based on a random hash and see if the offset is less than
-  // RehashProbabilityConstant().
-  return probe(ctrl, capacity, absl::HashOf(RandomSeed())).offset() <
-         RehashProbabilityConstant();
 }
 
 bool ShouldInsertBackwards(size_t hash, const ctrl_t* ctrl) {

@@ -361,15 +361,25 @@ using h2_t = uint8_t;
 // and the sentinel. They have the following bit patterns:
 //
 //      empty: 1 0 0 0 0 0 0 0
-//    deleted: 1 1 1 1 1 1 1 0
-//       full: 0 h h h h h h h  // h represents the hash bits.
-//   sentinel: 1 1 1 1 1 1 1 1
+//       full: 0 u h h h h h h  // h represents the hash bits.
+//                              // u represented unordered
 //
 // These values are specifically tuned for SSE-flavored SIMD.
 // The static_asserts below detail the source of these choices.
-//
-// We use an enum class so that when strict aliasing is enabled, the compiler
-// knows ctrl_t doesn't alias other types.
+class ctrl_t {
+ public:
+  static constexpr uint8_t kEmpty = 0x80;
+
+  ctrl_t(char value) :value_(value) {}
+
+  bool IsEmpty() const { return value_ == kEmpty; }
+  bool IsFull() const { return !IsEmpty(); }
+
+ private:
+  uint8_t value_;
+};
+
+#if 0
 enum class ctrl_t : int8_t {
   kEmpty = -128,   // 0b10000000
   kDeleted = -2,   // 0b11111110
@@ -401,14 +411,17 @@ static_assert(
 static_assert(ctrl_t::kDeleted == static_cast<ctrl_t>(-2),
               "ctrl_t::kDeleted must be -2 to make the implementation of "
               "ConvertSpecialToEmptyAndFullToDeleted efficient");
+#endif
 
-ABSL_DLL extern const ctrl_t kEmptyGroup[16];
+static const size_t max_slots_per_bucket = 14;
 
-// Returns a pointer to a control byte group that can be used by empty tables.
-inline ctrl_t* EmptyGroup() {
+// Returns a pointer to data that can be used by empty tables.
+ABSL_DLL extern const char kEmptyData[max_slots_per_bucket + 2];
+
+inline char* EmptyData() {
   // Const must be cast away here; no uses of this function will actually write
   // to it, because it is only used for empty tables.
-  return const_cast<ctrl_t*>(kEmptyGroup);
+  return const_cast<char*>(kEmptyData);
 }
 
 // Returns a pointer to a generation to use for an empty hashtable.
@@ -445,11 +458,59 @@ inline size_t H1(size_t hash, const ctrl_t* ctrl) {
 // These are used as an occupied control byte.
 inline h2_t H2(size_t hash) { return hash & 0x7F; }
 
-// Helpers for checking the state of a control byte.
-inline bool IsEmpty(ctrl_t c) { return c == ctrl_t::kEmpty; }
-inline bool IsFull(ctrl_t c) { return c >= static_cast<ctrl_t>(0); }
-inline bool IsDeleted(ctrl_t c) { return c == ctrl_t::kDeleted; }
-inline bool IsEmptyOrDeleted(ctrl_t c) { return c < ctrl_t::kSentinel; }
+// TODO: Maybe the template parameters can be removed on this code so that there
+// is less code bloat.
+template<size_t slots_per_bucket, class SlotType>
+class BucketPointer {
+  static constexpr uint16_t kSearchDistanceMask = (1u<<15) - 1u;
+ public:
+  BucketPointer() :bucket_start_(EmptyData()) {}
+  SlotType& GetSlot(size_t offset) {
+    assert(offset < slots_per_bucket);
+    return *reinterpret_cast<SlotType*>(bucket_start_ + slots_per_bucket + 2 + offset * sizeof(SlotType));
+  }
+  bool SlotIsFull(size_t offset) const {
+    return GetCtrl(offset).IsFull();
+  }
+  ctrl_t GetCtrl(size_t offset) const {
+    assert(offset < slots_per_bucket);
+    return ctrl_t(bucket_start_[2 + offset]);
+  }
+  size_t SearchDistance() const {
+    return (*reinterpret_cast<const uint16_t*>(bucket_start_)) & kSearchDistanceMask;
+  }
+  void SetSearchDistance(size_t distance) {
+    assert(distance <= kSearchDistanceMask);
+    uint16_t *p = reinterpret_cast<const uint16_t*>(bucket_start_);
+    *p = (*p & (~kSearchDistanceMask)) | distance;
+  }
+  void SetNotLastAndSearchDistanceToZero() {
+    uint16_t *p = reinterpret_cast<const uint16_t*>(bucket_start_);
+    *p = 0;
+  }
+  bool IsLast() const {
+    uint16_t *p = reinterpret_cast<const uint16_t*>(bucket_start_);
+    return *p >> 15;
+  }
+  BucketPointer& operator++() {
+    if (IsLast()) {
+      bucket_start_ = nullptr;
+    } else {
+      bucket_start_ += slots_per_bucket + 2 + slots_per_bucket * sizeof(SlotType);
+    }
+    return *this;
+  }
+  BucketPointer operator+(size_t bucket_count) {
+    BucketPointer result(bucket_start_);
+    result.bucket_start += bucket_count * (slots_per_bucket + 2 + slots_per_bucket * sizeof(SlotType));
+    return result;
+  }
+ private:
+  explicit BucketPointer(char *bucket_start) :bucket_start_(bucket_start) {
+    assert(bucket_start != nullptr);
+  }
+  char *bucket_start_ = EmptyData();
+};
 
 #ifdef ABSL_INTERNAL_HAVE_SSE2
 // Quick reference guide for intrinsics used below:
@@ -512,42 +573,22 @@ struct GroupSse2Impl {
 
   // Returns a bitmask representing the positions of empty slots.
   NonIterableBitMask<uint32_t, kWidth> MaskEmpty() const {
+    return NonIterableBitMask<uint32_t, kWidth>(MaskEmptyInt());
+  }
+
+  uint32_t MaskEmptyInt() const {
 #ifdef ABSL_INTERNAL_HAVE_SSSE3
-    // This only works because ctrl_t::kEmpty is -128.
-    return NonIterableBitMask<uint32_t, kWidth>(
-        static_cast<uint32_t>(_mm_movemask_epi8(_mm_sign_epi8(ctrl, ctrl))));
+    // This works because empty values have the sign bit set.
+    return static_cast<uint32_t>(_mm_movemask_epi8(ctrl));
 #else
     auto match = _mm_set1_epi8(static_cast<char>(ctrl_t::kEmpty));
-    return NonIterableBitMask<uint32_t, kWidth>(
-        static_cast<uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(match, ctrl))));
+    return static_cast<uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(match, ctrl)));
 #endif
   }
 
-  // Returns a bitmask representing the positions of empty or deleted slots.
-  NonIterableBitMask<uint32_t, kWidth> MaskEmptyOrDeleted() const {
-    auto special = _mm_set1_epi8(static_cast<char>(ctrl_t::kSentinel));
-    return NonIterableBitMask<uint32_t, kWidth>(static_cast<uint32_t>(
-        _mm_movemask_epi8(_mm_cmpgt_epi8_fixed(special, ctrl))));
-  }
-
-  // Returns the number of trailing empty or deleted elements in the group.
-  uint32_t CountLeadingEmptyOrDeleted() const {
-    auto special = _mm_set1_epi8(static_cast<char>(ctrl_t::kSentinel));
-    return TrailingZeros(static_cast<uint32_t>(
-        _mm_movemask_epi8(_mm_cmpgt_epi8_fixed(special, ctrl)) + 1));
-  }
-
-  void ConvertSpecialToEmptyAndFullToDeleted(ctrl_t* dst) const {
-    auto msbs = _mm_set1_epi8(static_cast<char>(-128));
-    auto x126 = _mm_set1_epi8(126);
-#ifdef ABSL_INTERNAL_HAVE_SSSE3
-    auto res = _mm_or_si128(_mm_shuffle_epi8(x126, ctrl), msbs);
-#else
-    auto zero = _mm_setzero_si128();
-    auto special_mask = _mm_cmpgt_epi8_fixed(zero, ctrl);
-    auto res = _mm_or_si128(msbs, _mm_andnot_si128(special_mask, x126));
-#endif
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(dst), res);
+  // Returns the number of trailing empty elements in the group.
+  uint32_t CountLeadingEmpty() const {
+    return TrailingZeros(static_cast<uint32_t>(MaskEmptyInt()));
   }
 
   __m128i ctrl;
@@ -707,12 +748,10 @@ class CommonFieldsGenerationInfoEnabled {
   CommonFieldsGenerationInfoEnabled& operator=(
       CommonFieldsGenerationInfoEnabled&&) = default;
 
-  // Whether we should rehash on insert in order to detect bugs of using invalid
-  // references. We rehash on the first insertion after reserved_growth_ reaches
-  // 0 after a call to reserve. We also do a rehash with low probability
-  // whenever reserved_growth_ is zero.
-  bool should_rehash_for_bug_detection_on_insert(const ctrl_t* ctrl,
-                                                 size_t capacity) const;
+  // We rehash on the first insertion after after reserved_growth_ reaches 0
+  // after a call to reserve.  In order to avoid having to also do a rehash with
+  // low probability whenever reserved_growth_ is zero, we just set
+  // reserved_growth_ to a lower value when we have GenerationInfo enabled.
   void maybe_increment_generation_on_insert() {
     if (reserved_growth_ == kReservedGrowthJustRanOut) reserved_growth_ = 0;
 
@@ -758,9 +797,6 @@ class CommonFieldsGenerationInfoDisabled {
   CommonFieldsGenerationInfoDisabled& operator=(
       CommonFieldsGenerationInfoDisabled&&) = default;
 
-  bool should_rehash_for_bug_detection_on_insert(const ctrl_t*, size_t) const {
-    return false;
-  }
   void maybe_increment_generation_on_insert() {}
   void reset_reserved_growth(size_t, size_t) {}
   size_t reserved_growth() const { return 0; }
@@ -810,6 +846,7 @@ using HashSetIteratorGenerationInfo = HashSetIteratorGenerationInfoDisabled;
 // CommonFields hold the fields in graveyard_raw_hash_set that do not depend
 // on template parameters. This allows us to conveniently pass all
 // of this state to helper functions as a single argument.
+template <size_t slots_per_bucket, class slot_type>
 class CommonFields : public CommonFieldsGenerationInfo {
  public:
   CommonFields() = default;
@@ -824,13 +861,11 @@ class CommonFields : public CommonFieldsGenerationInfo {
             std::move(static_cast<CommonFieldsGenerationInfo&&>(that))),
         // Explicitly copying fields into "this" and then resetting "that"
         // fields generates less code then calling absl::exchange per field.
-        control_(that.control_),
-        slots_(that.slots_),
+        buckets_(that.buckets_),
         size_(that.size_),
         capacity_(that.capacity_),
         compressed_tuple_(that.growth_left(), std::move(that.infoz())) {
-    that.control_ = EmptyGroup();
-    that.slots_ = nullptr;
+    that.buckets__ = BucketPointer<slots_per_bucket, slot_type>();
     that.size_ = 0;
     that.capacity_ = 0;
     that.growth_left() = 0;
@@ -845,33 +880,49 @@ class CommonFields : public CommonFieldsGenerationInfo {
     return compressed_tuple_.template get<1>();
   }
 
-  bool should_rehash_for_bug_detection_on_insert() const {
-    return CommonFieldsGenerationInfo::
-        should_rehash_for_bug_detection_on_insert(control_, capacity_);
-  }
   void reset_reserved_growth(size_t reservation) {
     CommonFieldsGenerationInfo::reset_reserved_growth(reservation, size_);
   }
 
-  // TODO(b/259599413): Investigate removing some of these fields:
-  // - control/slots can be derived from each other
-  // - size can be moved into the slot array
+  // We need to know the number of buckets, but sometimes we need the capacity
+  // (when deciding to insert backwards).  We don't want to constantly have to
+  // divide by 14.
+  class Capacity {
+    static constexpr ptrdiff_t ToEncodedCapacity(size_t capacity) {
+      assert(capacity <= std::numeric_limits<ptrdiff_t>::max());
+      if (capacity < slots_per_bucket) {
+        return -capacity;
+      } else {
+        assert(capacity % slots_per_bucket == 0);
+        return capacity / slots_per_bucket;
+      }
+    }
+    static constexpr size_t FromEncodedCapacity(ptrdiff_t encoded) {
+      if (encoded <= 0) {
+        return -encoded;
+      } else {
+        return encoded * slots_per_bucket;
+      }
+    }
+   public:
+    explicit Capacity(size_t capacity) :encoded_capacity_(ToEncodedCapacity(capacity)) {}
+    size_t capacity() const { return FromEncodedCapacity(encoded_capacity_); };
+    // Returns the number of buckets (0 if the capacity is 0).
+    size_t bucket_count() const {
+      if (encoded_capacity_ < 0) return 1;
+      else return encoded_capacity_;
+    }
+   private:
+    ptrdiff_t encoded_capacity_;
+  };
 
-  // The control bytes (and, also, a pointer to the base of the backing array).
-  //
-  // This contains `capacity + 1 + NumClonedBytes()` entries, even
-  // when the table is empty (hence EmptyGroup).
-  ctrl_t* control_ = EmptyGroup();
-
-  // The beginning of the slots, located at `SlotOffset()` bytes after
-  // `control`. May be null for empty tables.
-  void* slots_ = nullptr;
+  BucketPointer<slots_per_bucket, slot_type> buckets_;
 
   // The number of filled slots.
   size_t size_ = 0;
 
   // The total number of available slots.
-  size_t capacity_ = 0;
+  Capacity capacity_;
 
   // Bundle together growth_left and HashtablezInfoHandle to ensure EBO for
   // HashtablezInfoHandle when sampling is turned off.
@@ -974,141 +1025,6 @@ constexpr bool SwisstableDebugEnabled() {
 #endif
 }
 
-inline void AssertIsFull(const ctrl_t* ctrl, GenerationType generation,
-                         const GenerationType* generation_ptr,
-                         const char* operation) {
-  if (!SwisstableDebugEnabled()) return;
-  if (ctrl == nullptr) {
-    ABSL_INTERNAL_LOG(FATAL,
-                      std::string(operation) + " called on end() iterator.");
-  }
-  if (ctrl == EmptyGroup()) {
-    ABSL_INTERNAL_LOG(FATAL, std::string(operation) +
-                                 " called on default-constructed iterator.");
-  }
-  if (SwisstableGenerationsEnabled()) {
-    if (generation != *generation_ptr) {
-      ABSL_INTERNAL_LOG(FATAL,
-                        std::string(operation) +
-                            " called on invalid iterator. The table could have "
-                            "rehashed since this iterator was initialized.");
-    }
-    if (!IsFull(*ctrl)) {
-      ABSL_INTERNAL_LOG(
-          FATAL,
-          std::string(operation) +
-              " called on invalid iterator. The element was likely erased.");
-    }
-  } else {
-    if (!IsFull(*ctrl)) {
-      ABSL_INTERNAL_LOG(
-          FATAL,
-          std::string(operation) +
-              " called on invalid iterator. The element might have been erased "
-              "or the table might have rehashed. Consider running with "
-              "--config=asan to diagnose rehashing issues.");
-    }
-  }
-}
-
-// Note that for comparisons, null/end iterators are valid.
-inline void AssertIsValidForComparison(const ctrl_t* ctrl,
-                                       GenerationType generation,
-                                       const GenerationType* generation_ptr) {
-  if (!SwisstableDebugEnabled()) return;
-  const bool ctrl_is_valid_for_comparison =
-      ctrl == nullptr || ctrl == EmptyGroup() || IsFull(*ctrl);
-  if (SwisstableGenerationsEnabled()) {
-    if (generation != *generation_ptr) {
-      ABSL_INTERNAL_LOG(FATAL,
-                        "Invalid iterator comparison. The table could have "
-                        "rehashed since this iterator was initialized.");
-    }
-    if (!ctrl_is_valid_for_comparison) {
-      ABSL_INTERNAL_LOG(
-          FATAL, "Invalid iterator comparison. The element was likely erased.");
-    }
-  } else {
-    ABSL_HARDENING_ASSERT(
-        ctrl_is_valid_for_comparison &&
-        "Invalid iterator comparison. The element might have been erased or "
-        "the table might have rehashed. Consider running with --config=asan to "
-        "diagnose rehashing issues.");
-  }
-}
-
-// If the two iterators come from the same container, then their pointers will
-// interleave such that ctrl_a <= ctrl_b < slot_a <= slot_b or vice/versa.
-// Note: we take slots by reference so that it's not UB if they're uninitialized
-// as long as we don't read them (when ctrl is null).
-inline bool AreItersFromSameContainer(const ctrl_t* ctrl_a,
-                                      const ctrl_t* ctrl_b,
-                                      const void* const& slot_a,
-                                      const void* const& slot_b) {
-  // If either control byte is null, then we can't tell.
-  if (ctrl_a == nullptr || ctrl_b == nullptr) return true;
-  const void* low_slot = slot_a;
-  const void* hi_slot = slot_b;
-  if (ctrl_a > ctrl_b) {
-    std::swap(ctrl_a, ctrl_b);
-    std::swap(low_slot, hi_slot);
-  }
-  return ctrl_b < low_slot && low_slot <= hi_slot;
-}
-
-// Asserts that two iterators come from the same container.
-// Note: we take slots by reference so that it's not UB if they're uninitialized
-// as long as we don't read them (when ctrl is null).
-inline void AssertSameContainer(const ctrl_t* ctrl_a, const ctrl_t* ctrl_b,
-                                const void* const& slot_a,
-                                const void* const& slot_b,
-                                const GenerationType* generation_ptr_a,
-                                const GenerationType* generation_ptr_b) {
-  if (!SwisstableDebugEnabled()) return;
-  const bool a_is_default = ctrl_a == EmptyGroup();
-  const bool b_is_default = ctrl_b == EmptyGroup();
-  if (a_is_default != b_is_default) {
-    ABSL_INTERNAL_LOG(
-        FATAL,
-        "Invalid iterator comparison. Comparing default-constructed iterator "
-        "with non-default-constructed iterator.");
-  }
-  if (a_is_default && b_is_default) return;
-
-  if (SwisstableGenerationsEnabled()) {
-    if (generation_ptr_a == generation_ptr_b) return;
-    const bool a_is_empty = IsEmptyGeneration(generation_ptr_a);
-    const bool b_is_empty = IsEmptyGeneration(generation_ptr_b);
-    if (a_is_empty != b_is_empty) {
-      ABSL_INTERNAL_LOG(FATAL,
-                        "Invalid iterator comparison. Comparing iterator from "
-                        "a non-empty hashtable with an iterator from an empty "
-                        "hashtable.");
-    }
-    if (a_is_empty && b_is_empty) {
-      ABSL_INTERNAL_LOG(FATAL,
-                        "Invalid iterator comparison. Comparing iterators from "
-                        "different empty hashtables.");
-    }
-    const bool a_is_end = ctrl_a == nullptr;
-    const bool b_is_end = ctrl_b == nullptr;
-    if (a_is_end || b_is_end) {
-      ABSL_INTERNAL_LOG(FATAL,
-                        "Invalid iterator comparison. Comparing iterator with "
-                        "an end() iterator from a different hashtable.");
-    }
-    ABSL_INTERNAL_LOG(FATAL,
-                      "Invalid iterator comparison. Comparing non-end() "
-                      "iterators from different hashtables.");
-  } else {
-    ABSL_HARDENING_ASSERT(
-        AreItersFromSameContainer(ctrl_a, ctrl_b, slot_a, slot_b) &&
-        "Invalid iterator comparison. The iterators may be from different "
-        "containers or the container might have rehashed. Consider running "
-        "with --config=asan to diagnose rehashing issues.");
-  }
-}
-
 struct FindInfo {
   size_t offset;
   size_t probe_length;
@@ -1128,25 +1044,14 @@ struct FindInfo {
 // `ShouldInsertBackwards()` for small tables.
 inline bool is_small(size_t capacity) { return capacity < Group::kWidth - 1; }
 
-// Begins a probing operation on `common.control`, using `hash`.
-inline probe_seq<Group::kWidth> probe(const ctrl_t* ctrl, const size_t capacity,
-                                      size_t hash) {
-  return probe_seq<Group::kWidth>(H1(hash, ctrl), capacity);
-}
-inline probe_seq<Group::kWidth> probe(const CommonFields& common, size_t hash) {
-  return probe(common.control_, common.capacity_, hash);
-}
-
+#if 0
 // Probes an array of control bits using a probe sequence derived from `hash`,
 // and returns the offset corresponding to the first deleted or empty slot.
 //
 // Behavior when the entire table is full is undefined.
-//
-// NOTE: this function must work with tables having both empty and deleted
-// slots in the same group. Such tables appear during `erase()`.
-template <typename = void>
-inline FindInfo find_first_non_full(const CommonFields& common, size_t hash) {
-  auto seq = probe(common, hash);
+template <size_t slots_per_bucket, class slot_type>
+inline FindInfo find_first_non_full(const CommonFields<slots_per_bucket, slot_type>& common, size_t hash) {
+  auto seq = probe_seq{hash, common, hash};
   const ctrl_t* ctrl = common.control_;
   while (true) {
     Group g{ctrl + seq.offset()};
@@ -1219,6 +1124,7 @@ inline void SetCtrl(const CommonFields& common, size_t i, h2_t h,
                     size_t slot_size) {
   SetCtrl(common, i, static_cast<ctrl_t>(h), slot_size);
 }
+#endif
 
 // Given the capacity of a table, computes the offset (from the start of the
 // backing allocation) of the generation counter (if it exists).
@@ -1243,6 +1149,7 @@ inline size_t AllocSize(size_t capacity, size_t slot_size, size_t slot_align) {
   return SlotOffset(capacity, slot_align) + capacity * slot_size;
 }
 
+#if 0
 template <typename Alloc, size_t SizeOfSlot, size_t AlignOfSlot>
 ABSL_ATTRIBUTE_NOINLINE void InitializeSlots(CommonFields& c, Alloc alloc) {
   assert(c.capacity_);
@@ -1271,6 +1178,7 @@ ABSL_ATTRIBUTE_NOINLINE void InitializeSlots(CommonFields& c, Alloc alloc) {
   }
   c.infoz().RecordStorageChanged(c.size_, cap);
 }
+#endif
 
 // PolicyFunctions bundles together some information for a particular
 // graveyard_raw_hash_set<T, ...> instantiation. This information is passed to
@@ -1290,6 +1198,7 @@ struct PolicyFunctions {
                   void* slot_array, size_t n);
 };
 
+#if 0
 // ClearBackingArray clears the backing array, either modifying it in place,
 // or creating a new one based on the value of "reuse".
 // REQUIRES: c.capacity > 0
@@ -1315,6 +1224,7 @@ ABSL_ATTRIBUTE_NOINLINE void DeallocateStandard(void*,
   Deallocate<AlignOfSlot>(&alloc, ctrl,
                           AllocSize(n, policy.slot_size, AlignOfSlot));
 }
+#endif
 
 // For trivially relocatable types we use memcpy directly. This allows us to
 // share the same function body for graveyard_raw_hash_set instantiations that have the
@@ -1324,9 +1234,11 @@ ABSL_ATTRIBUTE_NOINLINE void TransferRelocatable(void*, void* dst, void* src) {
   memcpy(dst, src, SizeOfSlot);
 }
 
+#if 0
 // Type-erased version of graveyard_raw_hash_set::drop_deletes_without_resize.
 void DropDeletesWithoutResize(CommonFields& common,
                               const PolicyFunctions& policy, void* tmp_space);
+#endif
 
 // A SwissTable.
 //
@@ -1382,6 +1294,11 @@ class graveyard_raw_hash_set {
   using key_arg = typename KeyArgImpl::template type<K, key_type>;
 
  private:
+  // TODO: slots_per_bucket should depend on slot_type.  (See F14, for example).
+  static constexpr size_t slots_per_bucket = 14;
+
+  using common_fields = CommonFields<slots_per_bucket, slot_type>;
+
   // Give an early error when key_type is not hashable/eq.
   auto KeyTypeCanBeHashed(const Hash& h, const key_type& k) -> decltype(h(k));
   auto KeyTypeCanBeEq(const Eq& eq, const key_type& k) -> decltype(eq(k, k));
@@ -1422,6 +1339,8 @@ class graveyard_raw_hash_set {
   template <class... Ts>
   using IsDecomposable = IsDecomposable<void, PolicyTraits, Hash, Eq, Ts...>;
 
+  using BucketPtr = BucketPointer<slots_per_bucket, slot_type>;
+
  public:
   static_assert(std::is_same<pointer, value_type*>::value,
                 "Allocators with custom pointer types are not supported");
@@ -1444,21 +1363,20 @@ class graveyard_raw_hash_set {
 
     // PRECONDITION: not an end() iterator.
     reference operator*() const {
-      AssertIsFull(ctrl_, generation(), generation_ptr(), "operator*()");
-      return PolicyTraits::element(slot_);
+      AssertIsFull("operator*()");
+      return PolicyTraits::element(bucket_.GetSlot(slot_in_bucket_));
     }
 
     // PRECONDITION: not an end() iterator.
     pointer operator->() const {
-      AssertIsFull(ctrl_, generation(), generation_ptr(), "operator->");
+      AssertIsFull("operator->");
       return &operator*();
     }
 
     // PRECONDITION: not an end() iterator.
     iterator& operator++() {
-      AssertIsFull(ctrl_, generation(), generation_ptr(), "operator++");
-      ++ctrl_;
-      ++slot_;
+      AssertIsFull("operator++");
+      AdvanceByOne();
       skip_empty_or_deleted();
       return *this;
     }
@@ -1474,47 +1392,161 @@ class graveyard_raw_hash_set {
       AssertIsValidForComparison(b.ctrl_, b.generation(), b.generation_ptr());
       AssertSameContainer(a.ctrl_, b.ctrl_, a.slot_, b.slot_,
                           a.generation_ptr(), b.generation_ptr());
-      return a.ctrl_ == b.ctrl_;
+      return a.bucket_ == b.bucket_ && a.slot_in_bucket_ == b.slot_in_bucket_;
     }
     friend bool operator!=(const iterator& a, const iterator& b) {
       return !(a == b);
     }
 
    private:
-    iterator(ctrl_t* ctrl, slot_type* slot,
+    iterator(BucketPtr bucket_pointer,
+             size_t slot_in_bucket,
              const GenerationType* generation_ptr)
         : HashSetIteratorGenerationInfo(generation_ptr),
-          ctrl_(ctrl),
-          slot_(slot) {
-      // This assumption helps the compiler know that any non-end iterator is
-      // not equal to any end iterator.
-      ABSL_ASSUME(ctrl != nullptr);
+          bucket_(bucket_pointer),
+          slot_in_bucket_(slot_in_bucket) {
     }
-    // For end() iterators.
-    explicit iterator(const GenerationType* generation_ptr)
-        : HashSetIteratorGenerationInfo(generation_ptr), ctrl_(nullptr) {}
 
-    // Fixes up `ctrl_` to point to a full by advancing it and `slot_` until
+    void AdvanceByOne() {
+      ++slot_in_bucket_;
+      if (slot_in_bucket_ == slots_per_bucket) {
+        slot_in_bucket_ = 0;
+        ++bucket_;
+      }
+    }
+
+    // Fixes up the iterator to point to a full by advancing it and `slot_` until
     // they reach one.
     //
-    // If a sentinel is reached, we null `ctrl_` out instead.
+    // If the end reached, we turn it into an end iterator.
     void skip_empty_or_deleted() {
-      while (IsEmptyOrDeleted(*ctrl_)) {
-        uint32_t shift = Group{ctrl_}.CountLeadingEmptyOrDeleted();
-        ctrl_ += shift;
-        slot_ += shift;
+      // TODO(bradley): Vectorize the finding of the next full slot.
+      while (!bucket_.IsEnd() && bucket_.IsEmpty(slot_in_bucket_)) {
+        AdvanceByOne();
       }
-      if (ABSL_PREDICT_FALSE(*ctrl_ == ctrl_t::kSentinel)) ctrl_ = nullptr;
     }
 
-    // We use EmptyGroup() for default-constructed iterators so that they can
-    // be distinguished from end iterators, which have nullptr ctrl_.
-    ctrl_t* ctrl_ = EmptyGroup();
-    // To avoid uninitialized member warnings, put slot_ in an anonymous union.
-    // The member is not initialized on singleton and end iterators.
-    union {
-      slot_type* slot_;
-    };
+    bool IsEnd() const {
+      return slot_in_bucket_ == slots_per_bucket;
+    }
+
+    static constexpr size_t kDefaultConstructedSlot =
+        std::numeric_limits<size_t>::min();
+
+    bool IsDefault() const {
+      return slot_in_bucket_ == kDefaultConstructedSlot;
+    }
+
+    // We could probably reduce code bloat if we made these assertions not be
+    // templated on the slot_type, but this is for debug-mode, so it probably
+    // doesn't matter.
+    void AssertIsFull(const char* operation) const {
+      if (!SwisstableDebugEnabled()) return;
+      if (IsEnd()) {
+        ABSL_INTERNAL_LOG(FATAL,
+                          std::string(operation) + " called on end() iterator.");
+      }
+      if (IsDefault()) {
+        ABSL_INTERNAL_LOG(FATAL, std::string(operation) +
+                          " called on default-constructed iterator.");
+      }
+      if (SwisstableGenerationsEnabled()) {
+        if (generation() != *generation_ptr()) {
+          ABSL_INTERNAL_LOG(FATAL,
+                            std::string(operation) +
+                            " called on invalid iterator. The table could have "
+                            "rehashed since this iterator was initialized.");
+        }
+        if (!bucket_.IsFull(slot_in_bucket_)) {
+          ABSL_INTERNAL_LOG(
+              FATAL,
+              std::string(operation) +
+              " called on invalid iterator. The element was likely erased.");
+        }
+      } else {
+        if (!bucket_.IsFull(slot_in_bucket_)) {
+          ABSL_INTERNAL_LOG(
+              FATAL,
+              std::string(operation) +
+              " called on invalid iterator. The element might have been erased "
+              "or the table might have rehashed. Consider running with "
+              "--config=asan to diagnose rehashing issues.");
+        }
+      }
+    }
+
+    // Note that for comparisons, null/end iterators are valid.
+    void AssertIsValidForComparison() const {
+      if (!SwisstableDebugEnabled()) return;
+      if (IsEnd()) return;
+      if (SwisstableGenerationsEnabled()) {
+        if (generation() != *generation_ptr()) {
+          ABSL_INTERNAL_LOG(FATAL,
+                            "Invalid iterator comparison. The table could have "
+                            "rehashed since this iterator was initialized.");
+        }
+        if (!bucket_.IsFull()) {
+          ABSL_INTERNAL_LOG(
+              FATAL, "Invalid iterator comparison. The element was likely erased.");
+        }
+      } else {
+        ABSL_HARDENING_ASSERT(
+            bucket_.IsFull() &&
+            "Invalid iterator comparison. The element might have been erased or "
+            "the table might have rehashed. Consider running with --config=asan to "
+            "diagnose rehashing issues.");
+      }
+    }
+
+    // Asserts that two iterators come from the same container.
+    // Note: we take slots by reference so that it's not UB if they're uninitialized
+    // as long as we don't read them (when ctrl is null).
+    static void AssertSameContainer(iterator a, iterator b) {
+      if (!SwisstableDebugEnabled()) return;
+      if (a.IsDefault() != b.IsDefault()) {
+        ABSL_INTERNAL_LOG(
+            FATAL,
+            "Invalid iterator comparison. Comparing default-constructed iterator "
+            "with non-default-constructed iterator.");
+      }
+      if (a.IsDefault() && b.IsDefault()) return;
+
+      if (SwisstableGenerationsEnabled()) {
+        if (a.generation_ptr() == b.generation_ptr()) return;
+        const bool a_is_empty = IsEmptyGeneration(a.generation_ptr());
+        const bool b_is_empty = IsEmptyGeneration(b.generation_ptr());
+        if (a_is_empty != b_is_empty) {
+          ABSL_INTERNAL_LOG(FATAL,
+                            "Invalid iterator comparison. Comparing iterator from "
+                            "a non-empty hashtable with an iterator from an empty "
+                            "hashtable.");
+        }
+        if (a_is_empty && b_is_empty) {
+          ABSL_INTERNAL_LOG(FATAL,
+                            "Invalid iterator comparison. Comparing iterators from "
+                            "different empty hashtables.");
+        }
+        if (a.IsEnd() || b.IsEnd()) {
+          ABSL_INTERNAL_LOG(FATAL,
+                            "Invalid iterator comparison. Comparing iterator with "
+                            "an end() iterator from a different hashtable.");
+        }
+        ABSL_INTERNAL_LOG(FATAL,
+                          "Invalid iterator comparison. Comparing non-end() "
+                          "iterators from different hashtables.");
+      } else {
+        // We cannot easily check that iterators are from the same container
+        // with this representation.
+        return;
+      }
+    }
+
+
+    // End iterators are represented by `slot_in_bucket_ == slots_per_bucket`.
+    //
+    // Default-constructed iterators are represented by `slot_in_bucket == -1`.
+    BucketPtr bucket_;
+    size_t slot_in_bucket_ = kDefaultConstructedSlot;
   };
 
   class const_iterator {
@@ -1570,10 +1602,14 @@ class graveyard_raw_hash_set {
       size_t bucket_count, const hasher& hash = hasher(),
       const key_equal& eq = key_equal(),
       const allocator_type& alloc = allocator_type())
-      : settings_(CommonFields{}, hash, eq, alloc) {
+      : settings_(common_fields{}, hash, eq, alloc) {
     if (bucket_count) {
-      common().capacity_ = NormalizeCapacity(bucket_count);
-      initialize_slots();
+      allocate_slots();
+      auto bucket_pointer = common().buckets_;
+      for (size_t i = 0; i < bucket_count; ++i, ++bucket_pointer) {
+        bucket_pointer.SetNotLastAndSearchDistanceToZero();
+      }
+      common().buckets_[bucket_count - 1].SetLast();
     }
   }
 
@@ -1696,11 +1732,11 @@ class graveyard_raw_hash_set {
       :  // Hash, equality and allocator are copied instead of moved because
          // `that` must be left valid. If Hash is std::function<Key>, moving it
          // would create a nullptr functor that cannot be called.
-        settings_(absl::exchange(that.common(), CommonFields{}),
+        settings_(absl::exchange(that.common(), common_fields{}),
                   that.hash_ref(), that.eq_ref(), that.alloc_ref()) {}
 
   graveyard_raw_hash_set(graveyard_raw_hash_set&& that, const allocator_type& a)
-      : settings_(CommonFields{}, that.hash_ref(), that.eq_ref(), a) {
+      : settings_(common_fields{}, that.hash_ref(), that.eq_ref(), a) {
     if (a == that.alloc_ref()) {
       std::swap(common(), that.common());
     } else {
@@ -1791,12 +1827,14 @@ class graveyard_raw_hash_set {
   }
 
   inline void destroy_slots() {
-    const size_t cap = capacity();
-    const ctrl_t* ctrl = control();
-    slot_type* slot = slot_array();
-    for (size_t i = 0; i != cap; ++i) {
-      if (IsFull(ctrl[i])) {
-        PolicyTraits::destroy(&alloc_ref(), slot + i);
+    for (BucketPointer bp = common().buckets_; true; ++bp) {
+      for (size_t i = 0; i < slots_per_bucket; ++i) {
+        if (bp.SlotIsFull(i)) {
+          PolicyTraits::destroy(&alloc_ref(), bp.GetSlot(i));
+        }
+      }
+      if (bp.IsLast()) {
+        break;
       }
     }
   }
@@ -2336,14 +2374,38 @@ class graveyard_raw_hash_set {
   // the allocation.
   //
   // This does not free the currently held array; `capacity` must be nonzero.
-  inline void initialize_slots() {
+  inline void allocate_slots() {
     // People are often sloppy with the exact type of their allocator (sometimes
     // it has an extra const or is missing the pair, but rebinds made it work
     // anyway).
     using CharAlloc =
         typename absl::allocator_traits<Alloc>::template rebind_alloc<char>;
-    InitializeSlots<CharAlloc, sizeof(slot_type), alignof(slot_type)>(
-        common(), CharAlloc(alloc_ref()));
+
+    assert(common().capacity_);
+    // Folks with custom allocators often make unwarranted assumptions about the
+    // behavior of their classes vis-a-vis trivial destructability and what
+    // calls they will or won't make.  Avoid sampling for people with custom
+    // allocators to get us out of this mess.  This is not a hard guarantee but
+    // a workaround while we plan the exact guarantee we want to provide.
+    const size_t sample_size =
+        (std::is_same<Alloc, std::allocator<char>>::value)
+          ? sizeof(slot_type)
+          : 0;
+
+    const size_t cap = common().capacity_;
+    char* mem = static_cast<char*>(
+        Allocate<alignof(slot_type)>(&CharAlloc(alloc_ref()), AllocSize(cap, sizeof(slot_type), alignof(slot_type))));
+
+    const GenerationType old_generation = common().generation();
+    common().set_generation_ptr(
+        reinterpret_cast<GenerationType*>(mem + GenerationOffset(cap)));
+    common().set_generation(NextGeneration(old_generation));
+
+    common().buckets_ = BucketPtr(mem);
+    if (sample_size) {
+      common().infoz() = Sample(sample_size);
+    }
+    common().infoz().RecordStorageChanged(common().size_, cap);
   }
 
   ABSL_ATTRIBUTE_NOINLINE void resize(size_t new_capacity) {
@@ -2575,8 +2637,8 @@ class graveyard_raw_hash_set {
 #endif
   }
 
-  CommonFields& common() { return settings_.template get<0>(); }
-  const CommonFields& common() const { return settings_.template get<0>(); }
+  common_fields& common() { return settings_.template get<0>(); }
+  const common_fields& common() const { return settings_.template get<0>(); }
 
   ctrl_t* control() const { return common().control_; }
   slot_type* slot_array() const {
@@ -2635,9 +2697,9 @@ class graveyard_raw_hash_set {
   // Bundle together CommonFields plus other objects which might be empty.
   // CompressedTuple will ensure that sizeof is not affected by any of the empty
   // fields that occur after CommonFields.
-  absl::container_internal::CompressedTuple<CommonFields, hasher, key_equal,
+  absl::container_internal::CompressedTuple<common_fields, hasher, key_equal,
                                             allocator_type>
-      settings_{CommonFields{}, hasher{}, key_equal{}, allocator_type{}};
+      settings_{common_fields{}, hasher{}, key_equal{}, allocator_type{}};
 };
 
 // Erases all elements that satisfy the predicate `pred` from the container `c`.
