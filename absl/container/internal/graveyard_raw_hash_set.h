@@ -1605,11 +1605,7 @@ class graveyard_raw_hash_set {
       : settings_(common_fields{}, hash, eq, alloc) {
     if (bucket_count) {
       allocate_slots();
-      auto bucket_pointer = common().buckets_;
-      for (size_t i = 0; i < bucket_count; ++i, ++bucket_pointer) {
-        bucket_pointer.SetNotLastAndSearchDistanceToZero();
-      }
-      common().buckets_[bucket_count - 1].SetLast();
+      initialize_all_slots();
     }
   }
 
@@ -2408,13 +2404,22 @@ class graveyard_raw_hash_set {
     common().infoz().RecordStorageChanged(common().size_, cap);
   }
 
+  void initialize_all_slots() {
+    auto bucket_pointer = common().buckets_;
+    for (size_t i = 0; i < bucket_count; ++i, ++bucket_pointer) {
+      bucket_pointer.SetNotLastAndSearchDistanceToZero();
+    }
+    common().buckets_[bucket_count - 1].SetLast();
+  }
+
   ABSL_ATTRIBUTE_NOINLINE void resize(size_t new_capacity) {
     assert(IsValidCapacity(new_capacity));
     auto* old_ctrl = control();
     auto* old_slots = slot_array();
     const size_t old_capacity = common().capacity_;
     common().capacity_ = new_capacity;
-    initialize_slots();
+    allocate_slots();
+    initialize_all_slots();
 
     auto* new_slots = slot_array();
     size_t total_probe_length = 0;
@@ -2680,6 +2685,7 @@ class graveyard_raw_hash_set {
         AllocSize(n, sizeof(slot_type), alignof(slot_type)));
   }
 
+#if 0
   static const PolicyFunctions& GetPolicyFunctions() {
     static constexpr PolicyFunctions value = {
         sizeof(slot_type),
@@ -2693,6 +2699,7 @@ class graveyard_raw_hash_set {
     };
     return value;
   }
+#endif
 
   // Bundle together CommonFields plus other objects which might be empty.
   // CompressedTuple will ensure that sizeof is not affected by any of the empty
