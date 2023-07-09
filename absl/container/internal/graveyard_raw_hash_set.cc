@@ -26,16 +26,20 @@ namespace absl {
 ABSL_NAMESPACE_BEGIN
 namespace graveyard_container_internal {
 
+
+
+
 // A single block of empty control bytes for tables without any slots allocated.
 // This enables removing a branch in the hot path of find().
-template
-alignas(16) ABSL_CONST_INIT ABSL_DLL const EmptyData<14> kEmptyData = {
+template<>
+alignas(16) ABSL_CONST_INIT ABSL_DLL const EmptyBucket<14> kEmptyData<14> = {
   .ctrl = {ctrl_t::kEmpty, ctrl_t::kEmpty,
            ctrl_t::kEmpty,    ctrl_t::kEmpty, ctrl_t::kEmpty, ctrl_t::kEmpty,
            ctrl_t::kEmpty,    ctrl_t::kEmpty, ctrl_t::kEmpty, ctrl_t::kEmpty,
            ctrl_t::kEmpty,    ctrl_t::kEmpty, ctrl_t::kEmpty, ctrl_t::kEmpty},
-  .search_distance = 0,
-  .is_last_bucket = 1};
+  .is_last_bucket = 1,
+  .search_distance = 0
+};
 
 #ifdef ABSL_INTERNAL_NEED_REDUNDANT_CONSTEXPR_DECL
 constexpr size_t Group::kWidth;
@@ -78,24 +82,6 @@ bool ShouldInsertBackwards(size_t hash, const ctrl_t* ctrl) {
   return (H1(hash, ctrl) ^ RandomSeed()) % 13 > 6;
 }
 
-void ConvertDeletedToEmptyAndFullToDeleted(ctrl_t* ctrl, size_t capacity) {
-  assert(ctrl[capacity] == ctrl_t::kSentinel);
-  assert(IsValidCapacity(capacity));
-  for (ctrl_t* pos = ctrl; pos < ctrl + capacity; pos += Group::kWidth) {
-    Group{pos}.ConvertSpecialToEmptyAndFullToDeleted(pos);
-  }
-  // Copy the cloned ctrl bytes.
-  std::memcpy(ctrl + capacity + 1, ctrl, NumClonedBytes());
-  ctrl[capacity] = ctrl_t::kSentinel;
-}
-// Extern template instantiation for inline function.
-template FindInfo find_first_non_full(const CommonFields&, size_t);
-
-FindInfo find_first_non_full_outofline(const CommonFields& common,
-                                       size_t hash) {
-  return find_first_non_full(common, hash);
-}
-
 // Return address of the ith slot in slots where each slot occupies slot_size.
 static inline void* SlotAddress(void* slot_array, size_t slot,
                                 size_t slot_size) {
@@ -115,6 +101,7 @@ static inline void* PrevSlot(void* slot, size_t slot_size) {
   return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(slot) - slot_size);
 }
 
+#if 0
 void DropDeletesWithoutResize(CommonFields& common,
                               const PolicyFunctions& policy, void* tmp_space) {
   void* set = &common;
@@ -217,26 +204,7 @@ void EraseMetaOnly(CommonFields& c, ctrl_t* it, size_t slot_size) {
   c.growth_left() += (was_never_full ? 1 : 0);
   c.infoz().RecordErase();
 }
-
-void ClearBackingArray(CommonFields& c, const PolicyFunctions& policy,
-                       bool reuse) {
-  c.size_ = 0;
-  if (reuse) {
-    ResetCtrl(c, policy.slot_size);
-    c.infoz().RecordStorageChanged(0, c.capacity_);
-  } else {
-    void* set = &c;
-    (*policy.dealloc)(set, policy, c.control_, c.slots_, c.capacity_);
-    c.control_ = EmptyGroup();
-    c.set_generation_ptr(EmptyGeneration());
-    c.slots_ = nullptr;
-    c.capacity_ = 0;
-    c.growth_left() = 0;
-    c.infoz().RecordClearedReservation();
-    assert(c.size_ == 0);
-    c.infoz().RecordStorageChanged(0, 0);
-  }
-}
+#endif
 
 }  // namespace graveyard_container_internal
 ABSL_NAMESPACE_END

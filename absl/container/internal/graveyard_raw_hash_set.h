@@ -58,10 +58,10 @@
 // bucket is a pseudo-struct:
 //
 //   struct Bucket {
-//     // Usually SlotsPerBucket==14 .
-//     ctrl_t ctrl[SlotsPerBucket];
 //     uint16_t last_bucket : 1;
 //     uint16_t search_distance : 15;
+//     // Usually SlotsPerBucket==14 .
+//     ctrl_t ctrl[SlotsPerBucket];
 //     // slots may or may not contain objects.
 //     slot_type slots[SlotsPerBucket];
 //   };
@@ -236,6 +236,7 @@
 #include "absl/memory/memory.h"
 #include "absl/meta/type_traits.h"
 #include "absl/numeric/bits.h"
+#include "absl/numeric/int128.h"
 #include "absl/utility/utility.h"
 
 #ifdef ABSL_INTERNAL_HAVE_SSE2
@@ -413,15 +414,22 @@ static_assert(ctrl_t::kDeleted == static_cast<ctrl_t>(-2),
               "ConvertSpecialToEmptyAndFullToDeleted efficient");
 #endif
 
-static const size_t max_slots_per_bucket = 14;
+template <size_t SlotPerBucket>
+struct EmptyBucket {
+  ctrl_t   ctrl[SlotPerBucket];
+  uint16_t is_last_bucket : 1;
+  uint16_t search_distance : 15;
+};
 
 // Returns a pointer to data that can be used by empty tables.
-ABSL_DLL extern const char kEmptyData[max_slots_per_bucket + 2];
+template <size_t SlotsPerBucket>
+ABSL_DLL extern const EmptyBucket<SlotsPerBucket> kEmptyData;
 
+template <size_t SlotsPerBucket>
 inline char* EmptyData() {
   // Const must be cast away here; no uses of this function will actually write
   // to it, because it is only used for empty tables.
-  return const_cast<char*>(kEmptyData);
+  return const_cast<char*>(kEmptyData<SlotsPerBucket>);
 }
 
 // Returns a pointer to a generation to use for an empty hashtable.
@@ -458,16 +466,16 @@ inline size_t H1(size_t hash, const ctrl_t* ctrl) {
 // These are used as an occupied control byte.
 inline h2_t H2(size_t hash) { return hash & 0x7F; }
 
-// TODO: Maybe the template parameters can be removed on this code so that there
-// is less code bloat.
-template<size_t slots_per_bucket, class SlotType>
-class BucketPointer {
+template<size_t slots_per_bucket, size_t slot_size>
+class UntypedBucketPointer {
   static constexpr uint16_t kSearchDistanceMask = (1u<<15) - 1u;
  public:
-  BucketPointer() :bucket_start_(EmptyData()) {}
-  SlotType& GetSlot(size_t offset) {
+  UntypedBucketPointer() = default;
+  explicit UntypedBucketPointer(char *bucket_start) :bucket_start_(bucket_start)
+  {}
+  char* GetSlotAddress(size_t offset) {
     assert(offset < slots_per_bucket);
-    return *reinterpret_cast<SlotType*>(bucket_start_ + slots_per_bucket + 2 + offset * sizeof(SlotType));
+    return bucket_start_ + slots_per_bucket + 2 + offset * slot_size;
   }
   bool SlotIsFull(size_t offset) const {
     return GetCtrl(offset).IsFull();
@@ -492,24 +500,81 @@ class BucketPointer {
     uint16_t *p = reinterpret_cast<const uint16_t*>(bucket_start_);
     return *p >> 15;
   }
-  BucketPointer& operator++() {
+  UntypedBucketPointer& operator++() {
     if (IsLast()) {
-      bucket_start_ = nullptr;
+      bucket_start_ = EmptyData<slots_per_bucket>();
     } else {
-      bucket_start_ += slots_per_bucket + 2 + slots_per_bucket * sizeof(SlotType);
+      bucket_start_ += slots_per_bucket + 2 + slots_per_bucket * slot_size;
     }
     return *this;
   }
-  BucketPointer operator+(size_t bucket_count) {
-    BucketPointer result(bucket_start_);
-    result.bucket_start += bucket_count * (slots_per_bucket + 2 + slots_per_bucket * sizeof(SlotType));
+  UntypedBucketPointer operator+(size_t bucket_count) {
+    UntypedBucketPointer result(bucket_start_);
+    result.bucket_start += bucket_count * (slots_per_bucket + 2 + slots_per_bucket * slot_size);
     return result;
   }
+
  private:
-  explicit BucketPointer(char *bucket_start) :bucket_start_(bucket_start) {
-    assert(bucket_start != nullptr);
+  char *bucket_start_ = EmptyData<slots_per_bucket>();
+};
+
+// TODO: Maybe the template parameters can be removed on this code so that there
+// is less code bloat.
+template<size_t slots_per_bucket, class SlotType>
+class BucketPointer {
+ public:
+  using Untyped = UntypedBucketPointer<slots_per_bucket, sizeof(SlotType)>;
+  BucketPointer() = default;
+  explicit BucketPointer(char *bucket_start) :pointer_(bucket_start) {}
+  explicit BucketPointer(Untyped pointer) :pointer_(pointer) {}
+  char* GetSlotAddress(size_t offset) { return pointer_.GetSlotAddress(); }
+  SlotType& GetSlot(size_t offset) {
+    return *reinterpret_cast<SlotType*>(GetSlotAddress(offset));
   }
-  char *bucket_start_ = EmptyData();
+  bool SlotIsFull(size_t offset) const {
+    return pointer_.SlotIsFull(offset);
+  }
+  ctrl_t GetCtrl(size_t offset) const {
+    return pointer_.GetCtrl(offset);
+  }
+  size_t SearchDistance() const {
+    return pointer_.SearchDistance();
+  }
+  void SetSearchDistance(size_t distance) {
+    pointer_.SetSearchDistance(distance);
+  }
+  void SetNotLastAndSearchDistanceToZero() {
+    pointer_.SetNotLastAndSearchDistanceToZero();
+  }
+  bool IsLast() const {
+    return pointer_.IsLast();
+  }
+  BucketPointer& operator++() {
+    ++pointer_;
+    return *this;
+  }
+  BucketPointer operator+(size_t bucket_count) {
+    return BucketPointer(pointer_ + bucket_count);
+  }
+ private:
+  Untyped pointer_;
+};
+
+template<size_t slots_per_bucket, size_t slot_size, class Allocator>
+class RawBuckets {
+ public:
+  RawBuckets() = default;
+  explicit RawBuckets(char *data) :data_(data) {}
+  template <class Compare>
+  const char* Find(size_t h1, size_t h2) const {
+
+  }
+  char* Find(size_t h1, size_t h2) {
+    return const_cast<char *>(static_cast<const RawBuckets &>(this).Find(h1, h2));
+  }
+ private:
+  size_t bucket_count_ = 0;
+  char *data_ = EmptyData<slots_per_bucket>;
 };
 
 #ifdef ABSL_INTERNAL_HAVE_SSE2
@@ -884,6 +949,28 @@ class CommonFields : public CommonFieldsGenerationInfo {
     CommonFieldsGenerationInfo::reset_reserved_growth(reservation, size_);
   }
 
+  BucketPointer<slots_per_bucket, slot_type> buckets() const {
+    return buckets_;
+  }
+
+  // Clears the backing array, either modifying it in place,
+  // or creating a new one based on the value of "reuse".
+  // REQUIRES: c.capacity > 0
+  void ClearBackingArray(bool reuse) {
+    size_ = 0;
+    if (reuse) {
+      ResetCtrl(capacity_);
+      infoz().RecordStorageChanged(0, capacity_);
+    } else {
+      buckets_.Deallocate();
+      capacity_ = 0;
+      growth_left() = 0;
+
+      infoz().RecordClearedReservation();
+      infoz().RecordStorageChanged(0, 0);
+    }
+  }
+
   // We need to know the number of buckets, but sometimes we need the capacity
   // (when deciding to insert backwards).  We don't want to constantly have to
   // divide by 14.
@@ -1044,6 +1131,15 @@ struct FindInfo {
 // `ShouldInsertBackwards()` for small tables.
 inline bool is_small(size_t capacity) { return capacity < Group::kWidth - 1; }
 
+template<size_t slots_per_bucket, class slot_type>
+inline BucketPointer<slots_per_bucket, slot_type> probe(CommonFields<slots_per_bucket, slot_type>& common, size_t hash) {
+  uint128 h(hash);
+  uint128 c(common.bucket_count());
+  uint128 m = h * c;
+  uint64_t o = uint64_t(m >> 64);
+  return common.buckets() + o;
+}
+
 #if 0
 // Probes an array of control bits using a probe sequence derived from `hash`,
 // and returns the offset corresponding to the first deleted or empty slot.
@@ -1072,15 +1168,6 @@ inline FindInfo find_first_non_full(const CommonFields<slots_per_bucket, slot_ty
     assert(seq.index() <= common.capacity_ && "full table!");
   }
 }
-
-// Extern template for inline function keep possibility of inlining.
-// When compiler decided to not inline, no symbols will be added to the
-// corresponding translation unit.
-extern template FindInfo find_first_non_full(const CommonFields&, size_t);
-
-// Non-inlined version of find_first_non_full for use in less
-// performance critical routines.
-FindInfo find_first_non_full_outofline(const CommonFields&, size_t);
 
 inline void ResetGrowthLeft(CommonFields& common) {
   common.growth_left() = CapacityToGrowth(common.capacity_) - common.size_;
@@ -1199,32 +1286,27 @@ struct PolicyFunctions {
 };
 
 #if 0
-// ClearBackingArray clears the backing array, either modifying it in place,
-// or creating a new one based on the value of "reuse".
-// REQUIRES: c.capacity > 0
-void ClearBackingArray(CommonFields& c, const PolicyFunctions& policy,
-                       bool reuse);
-
 // Type-erased version of graveyard_raw_hash_set::erase_meta_only.
 void EraseMetaOnly(CommonFields& c, ctrl_t* it, size_t slot_size);
+#endif
 
 // Function to place in PolicyFunctions::dealloc for graveyard_raw_hash_sets
 // that are using std::allocator. This allows us to share the same
 // function body for graveyard_raw_hash_set instantiations that have the
 // same slot alignment.
-template <size_t AlignOfSlot>
-ABSL_ATTRIBUTE_NOINLINE void DeallocateStandard(void*,
+template<size_t AlignOfSlot, size_t slots_per_bucket, size_t slot_size>
+ABSL_ATTRIBUTE_NOINLINE void DeallocateStandard(UntypedBucketPointer<slots_per_bucket, slot_size> buckets,
                                                 const PolicyFunctions& policy,
-                                                ctrl_t* ctrl, void* slot_array,
                                                 size_t n) {
   // Unpoison before returning the memory to the allocator.
-  SanitizerUnpoisonMemoryRegion(slot_array, policy.slot_size * n);
+  for (size_t i = 0; i < n; ++i) {
+    SanitizerUnpoisonMemoryRegion(buckets.GetSlotAddress(i), slot_size);
+  }
 
   std::allocator<char> alloc;
-  Deallocate<AlignOfSlot>(&alloc, ctrl,
+  Deallocate<AlignOfSlot>(&alloc, buckets.Start(),
                           AllocSize(n, policy.slot_size, AlignOfSlot));
 }
-#endif
 
 // For trivially relocatable types we use memcpy directly. This allows us to
 // share the same function body for graveyard_raw_hash_set instantiations that have the
@@ -1711,7 +1793,7 @@ class graveyard_raw_hash_set {
     // than a full `insert`.
     for (const auto& v : that) {
       const size_t hash = PolicyTraits::apply(HashElement{hash_ref()}, v);
-      auto target = find_first_non_full_outofline(common(), hash);
+      auto target = find_first_non_full(common(), hash);
       SetCtrl(common(), target.offset, H2(hash), sizeof(slot_type));
       emplace_at(target.offset, v);
       common().maybe_increment_generation_on_insert();
@@ -1784,7 +1866,10 @@ class graveyard_raw_hash_set {
     return it;
   }
   iterator end() ABSL_ATTRIBUTE_LIFETIME_BOUND {
-    return iterator(common().generation_ptr());
+    // An end iterator is represented by slot_in_bucket == slots_per_bucket.
+    return iterator(common().buckets(),
+                    slots_per_bucket,
+                    common().generation_ptr());
   }
 
   const_iterator begin() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
@@ -1800,7 +1885,7 @@ class graveyard_raw_hash_set {
 
   bool empty() const { return !size(); }
   size_t size() const { return common().size_; }
-  size_t capacity() const { return common().capacity_; }
+  size_t capacity() const { return common().capacity_.capacity(); }
   size_t max_size() const { return (std::numeric_limits<size_t>::max)(); }
 
   ABSL_ATTRIBUTE_REINITIALIZES void clear() {
@@ -1816,8 +1901,7 @@ class graveyard_raw_hash_set {
       // Already guaranteed to be empty; so nothing to do.
     } else {
       destroy_slots();
-      ClearBackingArray(common(), GetPolicyFunctions(),
-                        /*reuse=*/cap < 128);
+      common().ClearBackingArray(/*reuse=*/cap < 128);
     }
     common().set_reserved_growth(0);
   }
@@ -2131,8 +2215,7 @@ class graveyard_raw_hash_set {
   void rehash(size_t n) {
     if (n == 0 && capacity() == 0) return;
     if (n == 0 && size() == 0) {
-      ClearBackingArray(common(), GetPolicyFunctions(),
-                        /*reuse=*/false);
+      common().ClearBackingArray(/*reuse=*/false);
       return;
     }
 
@@ -2685,7 +2768,6 @@ class graveyard_raw_hash_set {
         AllocSize(n, sizeof(slot_type), alignof(slot_type)));
   }
 
-#if 0
   static const PolicyFunctions& GetPolicyFunctions() {
     static constexpr PolicyFunctions value = {
         sizeof(slot_type),
@@ -2699,7 +2781,6 @@ class graveyard_raw_hash_set {
     };
     return value;
   }
-#endif
 
   // Bundle together CommonFields plus other objects which might be empty.
   // CompressedTuple will ensure that sizeof is not affected by any of the empty
@@ -2765,10 +2846,13 @@ struct HashtableDebugAccess<Set, absl::void_t<typename Set::graveyard_raw_hash_s
     if (per_slot != ~size_t{}) {
       m += per_slot * c.size();
     } else {
-      const ctrl_t* ctrl = c.control();
-      for (size_t i = 0; i != capacity; ++i) {
-        if (graveyard_container_internal::IsFull(ctrl[i])) {
-          m += Traits::space_used(c.slot_array() + i);
+      auto buckets = c.buckets();
+      size_t i = 0;
+      for (; i < capacity; ++buckets) {
+        for (size_t j = 0; j < Set::slots_per_bucket && i < capacity; ++j, ++i) {
+          if (buckets.SlotIsFull(j)) {
+            m += Traits::space_used(buckets.GetSlotAddress(j));
+          }
         }
       }
     }
