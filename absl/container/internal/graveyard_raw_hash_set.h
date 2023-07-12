@@ -531,6 +531,9 @@ class BucketPointer {
   SlotType& GetSlot(size_t offset) {
     return *reinterpret_cast<SlotType*>(GetSlotAddress(offset));
   }
+  const SlotType& GetSlot(size_t offset) const {
+    return *reinterpret_cast<const SlotType*>(GetSlotAddress(offset));
+  }
   bool SlotIsFull(size_t offset) const {
     return pointer_.SlotIsFull(offset);
   }
@@ -558,23 +561,6 @@ class BucketPointer {
   }
  private:
   Untyped pointer_;
-};
-
-template<size_t slots_per_bucket, size_t slot_size, class Allocator>
-class RawBuckets {
- public:
-  RawBuckets() = default;
-  explicit RawBuckets(char *data) :data_(data) {}
-  template <class Compare>
-  const char* Find(size_t h1, size_t h2) const {
-
-  }
-  char* Find(size_t h1, size_t h2) {
-    return const_cast<char *>(static_cast<const RawBuckets &>(this).Find(h1, h2));
-  }
- private:
-  size_t bucket_count_ = 0;
-  char *data_ = EmptyData<slots_per_bucket>;
 };
 
 #ifdef ABSL_INTERNAL_HAVE_SSE2
@@ -1791,6 +1777,10 @@ class graveyard_raw_hash_set {
     reserve(that.size());
     // Because the table is guaranteed to be empty, we can do something faster
     // than a full `insert`.
+    for (const value_type& v : that) {
+      insert(that);
+    }
+#if 0
     for (const auto& v : that) {
       const size_t hash = PolicyTraits::apply(HashElement{hash_ref()}, v);
       auto target = find_first_non_full(common(), hash);
@@ -1801,6 +1791,7 @@ class graveyard_raw_hash_set {
     }
     common().size_ = that.size();
     growth_left() -= that.size();
+#endif
   }
 
   ABSL_ATTRIBUTE_NOINLINE graveyard_raw_hash_set(graveyard_raw_hash_set&& that) noexcept(
@@ -2166,6 +2157,23 @@ class graveyard_raw_hash_set {
   // If the element already exists in `this`, it is left unmodified in `src`.
   template <typename H, typename E>
   void merge(graveyard_raw_hash_set<Policy, H, E, Alloc>& src) {  // NOLINT
+    auto bucket_pointer = common().buckets();
+    while (true) {
+      for (size_t offset = 0; offset < slots_per_bucket; ++offset) {
+        if (bucket_pointer.SlotIsFull(offset)) {
+          if (PolicyTraits::apply(InsertSlot<false>{*this, std::move(*bucket_pointer.GetSlot(offset))},
+                                  PolicyTraits::element())
+              .second) {
+            bucket_pointer.SetEmpty(offset);
+          }
+        }
+      }
+      if (bucket_pointer.IsLast()) {
+        break;
+      }
+      ++bucket_pointer;
+    }
+#if 0
     assert(this != &src);
     for (auto it = src.begin(), e = src.end(); it != e;) {
       auto next = std::next(it);
@@ -2176,6 +2184,7 @@ class graveyard_raw_hash_set {
       }
       it = next;
     }
+#endif
   }
 
   template <typename H, typename E>
@@ -2258,6 +2267,7 @@ class graveyard_raw_hash_set {
     return find(key) == end() ? 0 : 1;
   }
 
+#if 0
   // Issues CPU prefetch instructions for the memory needed to find or insert
   // a key.  Like all lookup functions, this support heterogeneous keys.
   //
@@ -2274,6 +2284,7 @@ class graveyard_raw_hash_set {
     PrefetchToLocalCache(slot_array() + seq.offset());
 #endif  // ABSL_HAVE_PREFETCH
   }
+#endif
 
   // The API of find() has two extensions.
   //
