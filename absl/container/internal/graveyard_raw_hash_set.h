@@ -352,33 +352,98 @@ class probe_seq {
   size_t bucket_count_;
 };
 
-using h2_t = uint8_t;
+// TODO: Make placement vary for each table (for fuzzing).  This is tricky since
+// I want the items to be sorted by H1 after a rehash.  I think the way to
+// proceed is to randomly choose whether we are inserting at the beginning
+// vs. at the end of a bucket.
 
 // The values here are selected for maximum performance. See the static asserts
 // below for details.
 
-// A `ctrl_t` is a single control byte, which can have one of four
-// states: empty, deleted, full (which has an associated seven-bit h2_t value)
-// and the sentinel. They have the following bit patterns:
-//
-//      empty: 1 0 0 0 0 0 0 0
-//       full: 0 u h h h h h h  // h represents the hash bits.
-//                              // u represented unordered
+// A `ctrl_t` is a single control byte, which is either "empty" or "full".
+//   empty     1 1 1 1 1 1 1 1
+//   full      u h h h h h h h   // h represents the hash bits.  h != 0x7F.
+//                               // u represented unordered
 //
 // These values are specifically tuned for SSE-flavored SIMD.
 // The static_asserts below detail the source of these choices.
+
+// A `Hash` is a full hash of a value.
+class Hash {
+ public:
+  explicit constexpr Hash(size_t hash) :hash_(hash) {}
+  constexpr size_t operator*() const { return hash_; }
+ private:
+  size_t hash_;
+};
+
+class H2;
+
 class ctrl_t {
  public:
-  static constexpr uint8_t kEmpty = 0x80;
+  static constexpr size_t kH2Modulo = 0x7F;
+  static constexpr uint8_t kEmpty = 0xFF;
 
-  ctrl_t(char value) :value_(value) {}
+  constexpr ctrl_t(uint8_t value) :value_(value) {}
 
-  bool IsEmpty() const { return value_ == kEmpty; }
-  bool IsFull() const { return !IsEmpty(); }
+  constexpr bool IsEmpty() const { return value_ == kEmpty; }
+  constexpr bool IsFull() const { return !IsEmpty(); }
+  // Returns the H2 hash in *this.
+  // this->H2() is valid only if ctrl.IsFull().
+  constexpr H2 GetH2() const;
+  // Returns true if the value is ordered.
+  // this->IsOrdered() is valid only if ctrl.IsFull().
+  //bool IsOrdered const { return (value_ & 0x80) == 0; }
+  //bool IsUnordered const { return (value_ & 0x80) != 0; }
+
+  constexpr uint8_t operator*() const { return value_; }
 
  private:
   uint8_t value_;
 };
+
+// H2 is the part of the hash used within the ctrl_t values.
+class H2 {
+ public:
+  explicit constexpr H2(Hash h) :h2_(*h % ctrl_t::kH2Modulo) {}
+  constexpr uint8_t operator*() const { return h2_; }
+ private:
+  friend ctrl_t;
+  explicit constexpr H2(uint8_t value) :h2_(value) {
+    assert(value < ctrl_t::kH2Modulo);
+  }
+  uint8_t h2_;
+};
+
+constexpr H2 ctrl_t::GetH2() const {
+  return H2(value_ & 0x7F);
+}
+
+// H1 is the part of the hash that chooses the preferred bucket.  It has not
+// been mapped into the table capacity.
+class H1 {
+ public:
+  // It turns out that H1 is the same as the hash, since we take the high-order
+  // bits when we convert to a TableIndex.
+  constexpr explicit H1(Hash h) :h1_(*h) {}
+  constexpr size_t operator*() const { return h1_; }
+ private:
+  size_t h1_;
+};
+
+// TableIndex is an H1 mapped into the table's capacity.
+class TableIndex {
+ public:
+  TableIndex(H1 hash, size_t table_size) {
+    uint128 h(*hash);
+    uint128 s(table_size);
+    uint128 i = h * s;
+    table_index_ = uint64_t(i >> 64);
+  }
+ private:
+  size_t table_index_;
+};
+
 
 #if 0
 enum class ctrl_t : int8_t {
@@ -445,6 +510,7 @@ inline bool IsEmptyGeneration(const GenerationType* generation) {
 // randomize insertion order within groups.
 bool ShouldInsertBackwards(size_t hash, const ctrl_t* ctrl);
 
+#if 0
 // Returns a per-table, hash salt, which changes on resize. This gets mixed into
 // H1 to randomize iteration order per-table.
 //
@@ -460,11 +526,7 @@ inline size_t PerTableSalt(const ctrl_t* ctrl) {
 inline size_t H1(size_t hash, const ctrl_t* ctrl) {
   return (hash >> 7) ^ PerTableSalt(ctrl);
 }
-
-// Extracts the H2 portion of a hash: the 7 bits not used for H1.
-//
-// These are used as an occupied control byte.
-inline h2_t H2(size_t hash) { return hash & 0x7F; }
+#endif
 
 template<size_t slots_per_bucket, size_t slot_size>
 class UntypedBucketPointer {
@@ -616,8 +678,8 @@ struct GroupSse2Impl {
   }
 
   // Returns a bitmask representing the positions of slots that match hash.
-  BitMask<uint32_t, kWidth> Match(h2_t hash) const {
-    auto match = _mm_set1_epi8(static_cast<char>(hash));
+  BitMask<uint32_t, kWidth> Match(H2 hash) const {
+    auto match = _mm_set1_epi8(static_cast<char>(*hash));
     return BitMask<uint32_t, kWidth>(
         static_cast<uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(match, ctrl))));
   }
@@ -713,7 +775,7 @@ struct GroupPortableImpl {
   explicit GroupPortableImpl(const ctrl_t* pos)
       : ctrl(little_endian::Load64(pos)) {}
 
-  BitMask<uint64_t, kWidth, 3> Match(h2_t hash) const {
+  BitMask<uint64_t, kWidth, 3> Match(ctrl_t ctrl_value) const {
     // For the technique, see:
     // http://graphics.stanford.edu/~seander/bithacks.html##ValueInWord
     // (Determine if a word has a byte equal to n).
@@ -725,11 +787,11 @@ struct GroupPortableImpl {
     //
     // Example:
     //   v = 0x1716151413121110
-    //   hash = 0x12
+    //   ctrl = 0x12
     //   retval = (v - lsbs) & ~v & msbs = 0x0000000080800000
     constexpr uint64_t msbs = 0x8080808080808080ULL;
     constexpr uint64_t lsbs = 0x0101010101010101ULL;
-    auto x = ctrl ^ (lsbs * hash);
+    auto x = ctrl ^ (lsbs * *ctrl_value);
     return BitMask<uint64_t, kWidth, 3>((x - lsbs) & ~x & msbs);
   }
 

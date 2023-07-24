@@ -76,11 +76,13 @@ GenerationType* EmptyGeneration() {
   return nullptr;
 }
 
+#if 0
 bool ShouldInsertBackwards(size_t hash, const ctrl_t* ctrl) {
   // To avoid problems with weak hashes and single bit tests, we use % 13.
   // TODO(kfm,sbenza): revisit after we do unconditional mixing
   return (H1(hash, ctrl) ^ RandomSeed()) % 13 > 6;
 }
+#endif
 
 // Return address of the ith slot in slots where each slot occupies slot_size.
 static inline void* SlotAddress(void* slot_array, size_t slot,
